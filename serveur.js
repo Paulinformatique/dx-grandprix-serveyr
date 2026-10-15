@@ -316,7 +316,12 @@ function lancerCourse(salle){
   let t = Date.now(), reste = 0, dernierEnvoi = 0;
   salle.boucle = setInterval(() => {
     const now = Date.now();
-    // serveur qui a coincé un moment : on rattrape le temps perdu (jusqu'à 3 s) pour rester à l'heure des joueurs
+    /* Le serveur a coincé (plus de 0,15 s sans tour) : on attend le tour
+       suivant pour lire d'abord les touches arrivées entre-temps, sinon il
+       rattrapait le temps perdu avec les touches d'il y a 3 secondes. */
+    if (now - t > 150 && !salle.reporte){ salle.reporte = true; return; }
+    salle.reporte = false;
+    // puis on rattrape le temps perdu (jusqu'à 3 s) pour rester à l'heure des joueurs
     reste += Math.min(3, (now - t) / 1000); t = now;
     try {
       if (!salle.sim) return;
@@ -324,7 +329,8 @@ function lancerCourse(salle){
       while (reste >= PAS){ sim.etape(PAS, salle.entrees); reste -= PAS; }
       if (now - dernierEnvoi >= ENVOI_MS){
         dernierEnvoi = now;
-        diffuser(salle, { t: "e", ts: now, ch: Math.round(sim.chrono() * 1000) / 1000, c: sim.etat() });
+        const m = JSON.stringify({ t: "e", ts: now, ch: Math.round(sim.chrono() * 1000) / 1000, c: sim.etat() });
+        for (const j of salle.joueurs) if (j.c.ouvert && !(j.c.engorge && j.c.engorge())) j.c.envoyer(m);
       }
       // tout le monde est arrivé (ou 90 s après le premier) : la course s'arrête côté serveur
       if (sim.toutFini()){ if (!salle.finiA) salle.finiA = now; if (now - salle.finiA > 8000) finCourse(salle); }
@@ -362,7 +368,9 @@ serveur.on("upgrade", (req, sock) => {
   sock.write("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " + accept + "\r\n\r\n");
   sock.setNoDelay(true);
   const c = { ouvert: true, salle: null, id: null, vu: Date.now(),
-    envoyer(t){ if (this.ouvert) try { sock.write(trame(t)); } catch (e) {} } };
+    envoyer(t){ if (this.ouvert) try { sock.write(trame(t)); } catch (e) {} },
+    // connexion qui n'avale plus (4G faible) : on saute des états plutôt que de les empiler (sinon ils arrivent avec des secondes de retard)
+    engorge(){ return sock.writableLength > 6000; } };
   let buf = Buffer.alloc(0), morceaux = [];
   sock.on("data", d => {
     buf = Buffer.concat([buf, d]);
