@@ -158,13 +158,31 @@ const AJOUT = String.raw`
     }
     for (const h of H){ h.vLatJ = (h.lat - (h.latPrecC ?? h.lat)) / Math.max(dt, 1e-4); h.latPrecC = h.lat; }
     jeu.joueur = null;
+    /* Entre deux joueurs, le coup de volant vers l'autre le pousse comme on
+       pousse un bot : il part en glissade de côté (dans l'herbe s'il est au bord). */
+    for (const h of H) if (h.pousseJ > 0) h.pousseJ -= dt;
+    for (let i = 0; i < H.length; i++) for (let j = 0; j < H.length; j++){
+      const a = H[i], b = H[j];
+      if (i === j || a.parti || b.parti || a.tempsFinal != null || b.tempsFinal != null || b.pousseJ > 0) continue;
+      const dx = b.x - a.x, dz = b.z - a.z; if (dx*dx + dz*dz > 25) continue;
+      const ca = Math.cos(a.cap), sa = Math.sin(a.cap);
+      const avant = dx*sa + dz*ca, cote = dx*ca - dz*sa;
+      if (Math.abs(avant) > 4.3 || Math.abs(cote) > 2.0) continue;
+      const versLui = Math.sign(b.lat - a.lat) || 1, elan = (a.vLatJ || 0) * versLui;
+      if (elan <= 1.2) continue;
+      const sB = Math.sign(cote) || 1, force = Math.min(10, 2 + elan * 1.3);
+      b.deriveX = ca * sB * force; b.deriveZ = -sa * sB * force; b.deriveT = 0.6;
+      b.cap += sB * 0.05; b.capVit = b.cap; b.pousseJ = 0.4; b.nPousse = (b.nPousse || 0) + 1;
+      a.v *= 0.97;
+    }
     collisions(dt);
     classer(); calculerAspiration(dt); noterPassages();
   };
   const r3 = x => Math.round((x || 0) * 1000) / 1000;
   SRV.etat = () => jeu.voitures.map(v => [v.idJ, r3(v.x), r3(v.y), r3(v.z), r3(v.cap), r3(v.tangage), r3(v.roulis), r3(v.braquage),
                                           r3(v.v), r3(v.lat), r3(v.distance), v.tour, v.meilleur == null ? null : r3(v.meilleur),
-                                          v.tempsFinal == null ? null : r3(v.tempsFinal), v.horsPiste ? 1 : 0, v.retour > 0 ? 1 : 0]);
+                                          v.tempsFinal == null ? null : r3(v.tempsFinal), v.horsPiste ? 1 : 0, v.retour > 0 ? 1 : 0,
+                                          v.nPousse || 0, r3(v.deriveX), r3(v.deriveZ)]);
   SRV.phase = () => jeu.phase;
   SRV.chrono = () => jeu.chrono;
   SRV.toutFini = () => jeu.voitures.every(v => !v.humain || v.tempsFinal != null || v.parti);
@@ -368,6 +386,8 @@ setInterval(() => {
     if (Date.now() - j.c.vu > 10000){ j.c.ouvert = false; quitter(j.c); }
 }, 2000);
 
+// utilisé par les essais : require("./serveur.js") donne le moteur sans lancer le serveur
+if (require.main !== module){ module.exports = { moteurAJour }; return; }
 serveur.listen(PORT, () => {
   journal("serveur DX Grand Prix sur le port", PORT);
   moteurAJour().catch(e => journal("jeu pas encore chargé :", e.message));
