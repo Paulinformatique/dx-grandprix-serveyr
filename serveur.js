@@ -24,7 +24,8 @@ const fs = require("fs");
 const PORT = +process.env.PORT || 10000;
 const GAME_URL = process.env.GAME_URL || "https://dx-grandprix.vercel.app/";
 const GAME_FILE = process.env.GAME_FILE || "";
-const MAX_SALLES = 3;            // courses en même temps (mémoire de l'offre gratuite)
+const MAX_VOITURES = 40;         // voitures en course en même temps, tous groupes confondus (le processeur de l'offre gratuite) :
+                                 // 3 courses pleines (12 joueurs + Kaimaxus), ou bien plus de petites courses
 const MAX_JOUEURS = 12;
 const PAS = 1 / 60;              // pas de la physique
 const ENVOI_MS = 33;             // état de la course envoyé ~30 fois par seconde
@@ -239,6 +240,8 @@ async function recevoir(c, d){
   if (!d || typeof d !== "object") return;
   if (d.t === "ping"){ envoyer(c, { t: "pong", t0: d.t0 }); return; }
   if (d.t === "creer" || d.t === "rejoindre"){
+    // il vient de se réveiller : préparer le jeu prend un moment, on prévient le joueur
+    if (!moteur || moteur.version !== versionJeu || d.v !== versionJeu) envoyer(c, { t: "attente" });
     try { await chargerJeu(); if (d.v !== versionJeu) await chargerJeu(true); await moteurAJour(); }
     catch (e){ envoyer(c, { t: "refus", raison: "Le serveur n'arrive pas à lire le jeu sur le site : " + e.message }); return; }
     if (d.v !== versionJeu){ envoyer(c, { t: "refus", raison: "Ta version du jeu n'est pas la même que celle du site : recharge la page (sur téléphone, ferme et rouvre l'onglet)." }); return; }
@@ -284,10 +287,13 @@ async function recevoir(c, d){
 }
 
 function lancerCourse(salle){
-  if (salles.size > MAX_SALLES && ![...salles.values()].slice(0, MAX_SALLES).includes(salle)){
-    diffuser(salle, { t: "refus-course", raison: "Le serveur est plein, réessaie dans un moment." }); return;
-  }
   const n = salle.joueurs.length + (salle.kaimaxus ? 1 : 0);
+  let enCourse = 0;
+  for (const x of salles.values()) if (x.sim) enCourse += x.nVoitures || 0;
+  if (enCourse + n > MAX_VOITURES){
+    diffuser(salle, { t: "refus-course", raison: "Trop de courses en même temps sur le serveur : réessaie dans une minute." }); return;
+  }
+  salle.nVoitures = n;
   const places = Array.from({ length: n }, (_, k) => k);
   for (let k = n - 1; k > 0; k--){ const r = Math.floor(Math.random() * (k + 1)); [places[k], places[r]] = [places[r], places[k]]; }
   const grille = salle.joueurs.map((j, k) => ({ id: j.id, nom: j.nom, coul: j.coul, place: places[k] }));
