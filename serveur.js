@@ -24,8 +24,8 @@ const fs = require("fs");
 const PORT = +process.env.PORT || 10000;
 const GAME_URL = process.env.GAME_URL || "https://dx-grandprix.vercel.app/";
 const GAME_FILE = process.env.GAME_FILE || "";
-const MAX_VOITURES = 40;         // voitures en course en même temps, tous groupes confondus (le processeur de l'offre gratuite) :
-                                 // 3 courses pleines (12 joueurs + Kaimaxus), ou bien plus de petites courses
+const MAX_VOITURES = 30;         // voitures en course en même temps, tous groupes confondus (le processeur de l'offre gratuite) :
+                                 // 2 courses pleines (12 joueurs + Kaimaxus), ou bien plus de petites courses
 const MAX_JOUEURS = 12;
 const PAS = 1 / 60;              // pas de la physique
 const ENVOI_MS = 33;             // état de la course envoyé ~30 fois par seconde
@@ -33,9 +33,11 @@ const ENVOI_MS = 33;             // état de la course envoyé ~30 fois par seco
 const journal = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 
 /* ───────────────────────── Code du jeu ───────────────────────── */
-let codeJeu = null, versionJeu = 0, chargeA = 0;
+let codeJeu = null, versionJeu = 0, chargeA = 0, empreinteJeu = "";
+const courseEnCours = () => [...salles.values()].some(x => x.sim);
 async function chargerJeu(forcer){
-  if (codeJeu && !forcer && Date.now() - chargeA < 10 * 60 * 1000) return;
+  // relire le site (9 Mo) fige le serveur un instant : jamais pendant une course, sauf s'il le faut vraiment
+  if (codeJeu && !forcer && (Date.now() - chargeA < 10 * 60 * 1000 || courseEnCours())) return;
   let html;
   if (GAME_FILE) html = fs.readFileSync(GAME_FILE, "utf8");
   else {
@@ -47,7 +49,8 @@ async function chargerJeu(forcer){
   if (!scripts.length) throw new Error("script du jeu introuvable");
   const code = scripts.reduce((a, b) => (b.length > a.length ? b : a));
   const m = code.match(/const MULTI_VERSION = (\d+)/);
-  codeJeu = code; versionJeu = m ? +m[1] : 0; chargeA = Date.now();
+  let h = 0; for (let i = 0; i < code.length; i += 7) h = (h * 31 + code.charCodeAt(i)) | 0;
+  codeJeu = code; versionJeu = m ? +m[1] : 0; chargeA = Date.now(); empreinteJeu = code.length + ":" + h;
   journal("jeu chargé, version multijoueur", versionJeu, "(" + Math.round(code.length / 1e6 * 10) / 10 + " Mo)");
 }
 
@@ -197,11 +200,14 @@ const AJOUT = String.raw`
 let moteur = null;
 async function moteurAJour(){
   await chargerJeu();
-  if (!moteur || moteur.version !== versionJeu){
+  /* refait quand le code du jeu a changé (même sans changer de version), pour
+     que le serveur roule exactement comme les joueurs — mais pas pendant une
+     course : ça bloquerait tout le monde plusieurs secondes */
+  if (!moteur || moteur.version !== versionJeu || (moteur.empreinte !== empreinteJeu && !courseEnCours())){
     const t0 = Date.now();
     const ctx = environnement();
     vm.runInContext(codeJeu + AJOUT, ctx, { filename: "jeu.js" });
-    moteur = { sim: ctx.__srv, version: versionJeu, circuits: ctx.__srv.circuits() };
+    moteur = { sim: ctx.__srv, version: versionJeu, empreinte: empreinteJeu, circuits: ctx.__srv.circuits() };
     journal("moteur prêt en", Date.now() - t0, "ms");
   }
   return moteur;
@@ -310,7 +316,8 @@ function lancerCourse(salle){
   let t = Date.now(), reste = 0, dernierEnvoi = 0;
   salle.boucle = setInterval(() => {
     const now = Date.now();
-    reste += Math.min(0.25, (now - t) / 1000); t = now;
+    // serveur qui a coincé un moment : on rattrape le temps perdu (jusqu'à 3 s) pour rester à l'heure des joueurs
+    reste += Math.min(3, (now - t) / 1000); t = now;
     try {
       if (!salle.sim) return;
       sim.activer(S);
