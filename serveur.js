@@ -307,7 +307,9 @@ function lancerCourse(salle){
   // le moteur du groupe : celui du jeu actuel (refait si le site a changé entre-temps)
   if (salle.moteur !== moteur && moteur) salle.moteur = moteur;
   const sim = salle.moteur.sim, S = {};
-  try { sim.activer(S); sim.preparer(salle.circuit, grille, salle.kaimaxus, placeKai); sim.sauver(S); }
+  try { sim.activer(S); sim.preparer(salle.circuit, grille, salle.kaimaxus, placeKai); sim.sauver(S);
+        // (essais seulement : un Kaimaxus lent, facile à rattraper)
+        if (process.env.DX_ESSAI_KAI_LENT) for (const v of S.jeu.voitures) if (v.kaimaxus) v.plafondMulti *= 0.55; }
   catch (e){ diffuser(salle, { t: "refus-course", raison: "Erreur du serveur : " + e.message }); journal("erreur", e); return; }
   salle.sim = sim; salle.S = S; salle.entrees = {}; salle.finiA = 0;
   diffuser(salle, { t: "depart", type: "depart", v: versionJeu, circuit: salle.circuit, grille, kaimaxus: salle.kaimaxus, placeKai, serveur: true });
