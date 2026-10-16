@@ -174,9 +174,9 @@ const AJOUT = String.raw`
       if (Math.abs(avant) > 4.3 || Math.abs(cote) > 2.0) continue;
       const versLui = Math.sign(b.lat - a.lat) || 1, elan = (a.vLatJ || 0) * versLui;
       if (elan <= 1.2) continue;
-      const sB = Math.sign(cote) || 1, force = Math.min(10, 2 + elan * 1.3);
+      const sB = Math.sign(cote) || 1, force = Math.min(9, 2 + elan * 1.15);     // un peu moins sec que contre un bot
       b.deriveX = ca * sB * force; b.deriveZ = -sa * sB * force; b.deriveT = 0.6;
-      b.cap += sB * 0.05; b.capVit = b.cap; b.pousseJ = 0.4; b.nPousse = (b.nPousse || 0) + 1;
+      b.cap += sB * 0.03; b.capVit = b.cap; b.pousseJ = 0.4; b.nPousse = (b.nPousse || 0) + 1;
       a.v *= 0.97;
     }
     collisions(dt);
