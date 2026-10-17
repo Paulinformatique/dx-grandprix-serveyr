@@ -1,13 +1,13 @@
 -- Tables du chat de DX Grand Prix (à coller une fois dans Supabase → SQL Editor → Run).
 -- Seul le serveur Render y accède, avec la clé secrète : la sécurité par ligne (RLS)
 -- est activée sans aucune règle, donc la clé publique du jeu ne peut RIEN lire ici.
-drop table if exists dx_comptes, dx_relations, dx_groupes, dx_messages, dx_lus;
+-- ⚠️ ne jamais ajouter de « drop table » ici : ça efface tous les comptes, amis et messages
 
-create table dx_comptes   (id text primary key, nom text not null, hash text not null, cree bigint, stats jsonb);
-create table dx_relations (de text not null, vers text not null, etat text not null, primary key (de, vers));
-create table dx_groupes   (id text primary key, nom text, membres jsonb, cree bigint);
-create table dx_messages  (id bigint primary key, de text not null, vers text not null, texte text not null, t bigint, img text);
-create table dx_lus       (joueur text not null, conv text not null, dernier bigint, primary key (joueur, conv));
+create table if not exists dx_comptes   (id text primary key, nom text not null, hash text not null, cree bigint, stats jsonb);
+create table if not exists dx_relations (de text not null, vers text not null, etat text not null, primary key (de, vers));
+create table if not exists dx_groupes   (id text primary key, nom text, membres jsonb, cree bigint);
+create table if not exists dx_messages  (id bigint primary key, de text not null, vers text not null, texte text not null, t bigint, img text);
+create table if not exists dx_lus       (joueur text not null, conv text not null, dernier bigint, primary key (joueur, conv));
 
 alter table dx_comptes   enable row level security;
 alter table dx_relations enable row level security;
