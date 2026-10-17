@@ -113,27 +113,34 @@ const AJOUT = String.raw`
   SRV.sauver = S => { S.jeu = Object.assign({}, jeu); S.piste = piste; S.demi = DEMI_PISTE; };
   SRV.version = typeof MULTI_VERSION !== "undefined" ? MULTI_VERSION : 0;
   SRV.circuits = () => coursesMulti().map(c => c.nom);
-  SRV.preparer = (nomCircuit, grille, kaimaxus, placeKai) => {
+  SRV.preparer = (nomCircuit, grille, kaimaxus, placeKai, mode) => {
     const i = CIRCUITS.findIndex(c => c.nom === nomCircuit && !c.essai);
     if (i < 0) throw new Error("course inconnue");
     const g = grille.map(j => Object.assign({}, j, { coul: MULTI_COULEURS[j.coul % MULTI_COULEURS.length] }));
     const p = g[0];
-    jeu.multi = { grille: g, moi: p.id, maPlace: p.place, maCouleur: p.coul, monNom: p.nom, kaimaxus: !!kaimaxus, placeKai };
+    for (const j of g) j.voiture = VOITURES[j.voiture] ? j.voiture | 0 : 0;
+    jeu.multi = { grille: g, moi: p.id, maPlace: p.place, maCouleur: p.coul, monNom: p.nom, kaimaxus: !!kaimaxus, placeKai, maVoiture: p.voiture, mode: mode || "course" };
+    jeu.modeMulti = mode || "course"; jeu.elimTour = 0; jeu.elimCompte = 0;
     jeu.adversaires = kaimaxus ? ["Kaimaxus"] : [];
     jeu.partieCourse = 1; jeu.circuit = i; jeu.pauseMulti = false;
     reseau.hote = true;                       // Kaimaxus roule ici, comme une vraie voiture
     preparerCourse(i);
     for (const v of jeu.voitures){
-      if (v.distant){ v.distant = false; v.joueur = true; v.idJ = v.idDistant; v.modele = 0; v.vmax = VOITURES[0].R.vmax; }
+      if (v.distant){ v.distant = false; v.joueur = true; v.idJ = v.idDistant; }
       else if (v.joueur) v.idJ = p.id;
-      if (v.joueur){ v.humain = true; v.tour = -1; v.dirL = 0; }
+      if (v.joueur){
+        // chaque joueur dans sa voiture (M3, la sienne, ou tirée au hasard)
+        const j = g.find(x => x.id === v.idJ), m = j ? j.voiture : 0;
+        v.modele = m; v.modeleMulti = m; v.R = reglages(VOITURES[m].stats); v.vmax = VOITURES[m].R.vmax;
+        v.humain = true; v.tour = -1; v.dirL = 0;
+      }
       if (v.kaimaxus) v.idJ = "kaimaxus";
     }
     jeu.joueur = null;
     return { tours: CIRCUITS[i].tours };
   };
   const arrivee = v => {
-    const R = VOITURES[0].R;
+    const R = VOITURES[v.modeleMulti || 0].R;
     Object.assign(v, { R: Object.assign({}, R, { vmax: R.vmax * 0.5 }), adresse: 0.3, irregulier: 0.02,
       s: v.distance, vlat: 0, trouble: 0, lacetChoc: 0, capLisse: 0, bruit: 0, horsT: 0, ligneIdx: 0, rayonRoue: v.rayonRoue || 0.33, enArrivee: true });
   };
@@ -151,6 +158,7 @@ const AJOUT = String.raw`
     const H = [];
     for (const v of jeu.voitures){
       v.tempsTour += dt;
+      if (v.parti) continue;                         // parti ou éliminé : sa voiture ne bouge plus
       if (!v.humain){ majIA(v, dt); continue; }
       H.push(v);
       if (v.parti) continue;                         // parti : sa voiture ne bouge plus (les autres la voient disparaître)
@@ -182,16 +190,34 @@ const AJOUT = String.raw`
     }
     collisions(dt);
     classer(); calculerAspiration(dt); noterPassages();
+    if (jeu.modeMulti === "elimination") eliminer(def.tours);
   };
+  /* Mode élimination : à chaque tour bouclé par le premier, le dernier est
+     éliminé (plusieurs d'un coup s'il le faut) pour qu'il en reste deux au
+     dernier tour, qui se jouent la victoire. */
+  const eliminer = tours => {
+    const tete = Math.max(...jeu.voitures.filter(v => !v.parti).map(v => v.tour));
+    if (!(tete >= 1) || tete <= jeu.elimTour || tete >= tours) return;
+    jeu.elimTour = tete;
+    const actifs = jeu.voitures.filter(v => !v.parti && !v.elimine && v.tempsFinal == null).sort((a, b) => a.distance - b.distance);
+    const k = actifs.length > 2 ? Math.ceil((actifs.length - 2) / (tours - tete)) : 0;
+    for (const v of actifs.slice(0, k)){
+      v.elimine = true; v.parti = true; v.elimOrdre = ++jeu.elimCompte; v.distanceElim = v.distance;
+      v.x = v.z = 1e6; v.v = 0;
+    }
+  };
+  // le classement final de la course (pour les points)
+  SRV.resultats = () => jeu.voitures.map(v => ({ id: v.idJ, nom: v.nom, tf: v.tempsFinal, d: v.elimine ? v.distanceElim : v.distance,
+                                                  elim: v.elimOrdre || 0, parti: !!v.parti && !v.elimine, meilleur: v.meilleur }));
   const r3 = x => Math.round((x || 0) * 1000) / 1000;
   SRV.etat = () => jeu.voitures.map(v => [v.idJ, r3(v.x), r3(v.y), r3(v.z), r3(v.cap), r3(v.tangage), r3(v.roulis), r3(v.braquage),
                                           r3(v.v), r3(v.lat), r3(v.distance), v.tour, v.meilleur == null ? null : r3(v.meilleur),
                                           v.tempsFinal == null ? null : r3(v.tempsFinal), v.horsPiste ? 1 : 0, v.retour > 0 ? 1 : 0,
-                                          v.nPousse || 0, r3(v.deriveX), r3(v.deriveZ)]);
+                                          v.nPousse || 0, r3(v.deriveX), r3(v.deriveZ), v.elimine ? 1 : 0]);
   SRV.phase = () => jeu.phase;
   SRV.chrono = () => jeu.chrono;
   SRV.toutFini = () => jeu.voitures.every(v => !v.humain || v.tempsFinal != null || v.parti);
-  SRV.depart = id => { const v = jeu.voitures.find(x => x.idJ === id); if (v){ v.parti = true; v.humain = true; v.x = v.z = 1e6; v.distance = -1e6; v.v = 0; } };
+  SRV.depart = id => { const v = jeu.voitures.find(x => x.idJ === id); if (v && !v.elimine){ v.parti = true; v.humain = true; v.x = v.z = 1e6; v.distance = -1e6; v.v = 0; } };
   return SRV;
 })();
 `;
@@ -221,10 +247,34 @@ const codeAleatoire = () => Array.from({ length: 5 }, () => "ABCDEFGHJKLMNPQRSTU
 const nid = () => crypto.randomBytes(6).toString("hex");
 
 function envoyer(c, msg){ if (c && c.ouvert) c.envoyer(JSON.stringify(msg)); }
-function diffuser(salle, msg){ const s = JSON.stringify(msg); for (const j of salle.joueurs) if (j.c.ouvert) j.c.envoyer(s); }
+function diffuser(salle, msg){ const s = JSON.stringify(msg); for (const j of salle.joueurs) if (j.c.ouvert) j.c.envoyer(s);
+  for (const c of salle.spectateurs || []) if (c.ouvert) c.envoyer(s); }
+/* ───── Modes du multijoueur ───── */
+const MODES = ["course", "championnat", "equipes", "elimination"];
+const CHOIX_VOITURES = ["m3", "garage", "hasard"];
+const POINTS = [25, 18, 15, 12, 10, 8, 6, 4, 2, 1];
+const NB_VOITURES = 18;
+// championnat : les 30 courses + 2 tirées en double (32 = 8 championnats de 4), mélangées ;
+// jamais deux fois la même course dans un championnat
+function nouveauPaquet(liste){
+  const p = [...liste, ...[...liste].sort(() => Math.random() - .5).slice(0, 32 - liste.length > 0 ? 32 - liste.length : 0)];
+  for (let essai = 0; essai < 200; essai++){
+    for (let k = p.length - 1; k > 0; k--){ const r = Math.floor(Math.random() * (k + 1)); [p[k], p[r]] = [p[r], p[k]]; }
+    let ok = true;
+    for (let i = 0; i < p.length; i += 4) if (new Set(p.slice(i, i + 4)).size < p.slice(i, i + 4).length) ok = false;
+    if (ok) break;
+  }
+  return p;
+}
+function infoChamp(salle){
+  const ch = salle.champ; if (!ch) return null;
+  const general = Object.entries(ch.points).map(([id, pts]) => ({ id, nom: ch.noms[id] || "?", pts })).sort((a, b) => b.pts - a.pts);
+  return { courses: ch.courses, n: ch.n, fini: ch.n >= ch.courses.length, general };
+}
 function infoSalon(salle){
   return { t: "salon", v: versionJeu, code: salle.code, circuit: salle.circuit, kaimaxus: salle.kaimaxus, enCourse: !!salle.sim,
-           joueurs: salle.joueurs.map(j => ({ id: j.id, nom: j.nom, coul: j.coul, hote: j === salle.joueurs[0], lien: "serveur" })) };
+           mode: salle.mode, voitures: salle.voitures, champ: infoChamp(salle),
+           joueurs: salle.joueurs.map(j => ({ id: j.id, nom: j.nom, coul: j.coul, hote: j === salle.joueurs[0], lien: "serveur", equipe: j.equipe, voiture: j.voiture })) };
 }
 function majSalon(salle){ diffuser(salle, infoSalon(salle)); }
 
@@ -237,7 +287,9 @@ function quitter(c){
   if (!salle.joueurs.length){ fermerSalle(salle); return; }
   majSalon(salle);
 }
+function retirerSpectateur(c){ if (c.specSalle){ c.specSalle.spectateurs && c.specSalle.spectateurs.delete(c); c.specSalle = null; } }
 function fermerSalle(salle){
+  for (const c of salle.spectateurs || []) envoyer(c, { t: "refus", raison: "La course est terminée." });
   if (salle.boucle) clearInterval(salle.boucle);
   salle.sim = null; salles.delete(salle.code);
   journal("groupe", salle.code, "fermé");
@@ -257,9 +309,10 @@ async function recevoir(c, d){
     const nom = String(d.nom || "Joueur").slice(0, 16);
     if (d.t === "creer"){
       let code; do code = codeAleatoire(); while (salles.has(code));
-      const salle = { code, joueurs: [], circuit: moteur.circuits[0], listeCircuits: moteur.circuits, moteur, kaimaxus: true, sim: null, S: null, boucle: null, entrees: {} };
+      const salle = { code, joueurs: [], circuit: moteur.circuits[0], listeCircuits: moteur.circuits, moteur, kaimaxus: true, sim: null, S: null, boucle: null, entrees: {},
+                      mode: "course", voitures: "m3", champ: null, paquet: [] };
       salles.set(code, salle);
-      const j = { id: nid(), nom, coul: 0, c };
+      const j = { id: nid(), nom, coul: 0, c, equipe: 0, voiture: 0 };
       salle.joueurs.push(j); c.salle = salle; c.id = j.id;
       envoyer(c, { t: "bienvenue", id: j.id, code, hote: true });
       majSalon(salle);
@@ -271,10 +324,22 @@ async function recevoir(c, d){
     if (salle.joueurs.length >= MAX_JOUEURS){ envoyer(c, { t: "refus", raison: "Le groupe est plein (12 joueurs maximum)." }); return; }
     if (salle.sim){ envoyer(c, { t: "refus", raison: "Une course est en cours : réessaie dans un moment." }); return; }
     const prises = new Set(salle.joueurs.map(x => x.coul)); let coul = 0; while (prises.has(coul)) coul++;
-    const j = { id: nid(), nom, coul: coul % COULEURS, c };
+    const j = { id: nid(), nom, coul: coul % COULEURS, c, equipe: salle.joueurs.length % 2, voiture: 0 };
     salle.joueurs.push(j); c.salle = salle; c.id = j.id;
     envoyer(c, { t: "bienvenue", id: j.id, code: salle.code, hote: false });
     majSalon(salle);
+    return;
+  }
+  // spectateur : regarder la course d'un ami (sans voiture)
+  if (d.t === "spectateur"){
+    if (d.v !== versionJeu) return envoyer(c, { t: "refus", raison: "Ta version du jeu n'est pas la même que celle du site : recharge la page." });
+    const salle = salles.get(String(d.code || "").toUpperCase());
+    if (!salle || !salle.sim) return envoyer(c, { t: "refus", raison: "Cette course est déjà finie." });
+    quitter(c); retirerSpectateur(c);
+    (salle.spectateurs = salle.spectateurs || new Set()).add(c); c.specSalle = salle; c.id = "spec-" + nid();
+    envoyer(c, { t: "bienvenue", id: c.id, code: salle.code, hote: false, spectateur: true });
+    envoyer(c, { t: "depart", type: "depart", v: versionJeu, circuit: salle.circuit, grille: salle.grille, kaimaxus: salle.kaimaxus, placeKai: salle.placeKai,
+                 serveur: true, mode: salle.mode, spectateur: true, suivre: String(d.suivre || ""), champ: null });
     return;
   }
   const salle = c.salle; if (!salle) return;
@@ -295,7 +360,20 @@ async function recevoir(c, d){
   if (d.t === "choix" && hote && !salle.sim){
     if (d.circuit && (salle.listeCircuits || []).includes(d.circuit)) salle.circuit = d.circuit;
     if (typeof d.kaimaxus === "boolean") salle.kaimaxus = d.kaimaxus;
+    if (MODES.includes(d.mode) && d.mode !== salle.mode){ salle.mode = d.mode; salle.champ = null; salle.dernierResultat = null; }
+    if (CHOIX_VOITURES.includes(d.voitures)) salle.voitures = d.voitures;
+    if (d.nouveauChamp && salle.mode === "championnat") salle.champ = null;
     majSalon(salle); return;
+  }
+  // équipes : l'hôte change l'équipe d'un joueur en touchant sa couleur
+  if (d.t === "equipe" && hote && !salle.sim){
+    const j = salle.joueurs.find(x => x.id === d.id); if (!j) return;
+    j.equipe = ((+d.equipe | 0) % 4 + 4) % 4; majSalon(salle); return;
+  }
+  // chacun choisit sa voiture (mode « chacun sa voiture »)
+  if (d.t === "voiture" && !salle.sim){
+    const j = salle.joueurs.find(x => x.c === c); if (!j) return;
+    const v = +d.voiture | 0; j.voiture = v >= 0 && v < NB_VOITURES ? v : 0; majSalon(salle); return;
   }
   if (d.t === "lancer" && hote && !salle.sim){ lancerCourse(salle); return; }
   if (d.t === "retour" && hote){ finCourse(salle); return; }
@@ -311,17 +389,30 @@ function lancerCourse(salle){
   salle.nVoitures = n;
   const places = Array.from({ length: n }, (_, k) => k);
   for (let k = n - 1; k > 0; k--){ const r = Math.floor(Math.random() * (k + 1)); [places[k], places[r]] = [places[r], places[k]]; }
-  const grille = salle.joueurs.map((j, k) => ({ id: j.id, nom: j.nom, coul: j.coul, place: places[k] }));
+  // la course : choisie par l'hôte, ou la suivante du championnat
+  if (salle.mode === "championnat"){
+    if (!salle.champ || salle.champ.n >= salle.champ.courses.length){
+      if (salle.paquet.length < 4) salle.paquet = nouveauPaquet(salle.listeCircuits);
+      salle.champ = { courses: salle.paquet.splice(0, 4), n: 0, points: {}, noms: {} };
+    }
+    salle.circuit = salle.champ.courses[salle.champ.n];
+  }
+  const voitureDe = j => salle.voitures === "garage" ? j.voiture : salle.voitures === "hasard" ? Math.floor(Math.random() * NB_VOITURES) : 0;
+  const grille = salle.joueurs.map((j, k) => ({ id: j.id, nom: j.nom, coul: salle.mode === "equipes" ? j.equipe : j.coul, place: places[k],
+                                                voiture: voitureDe(j), equipe: salle.mode === "equipes" ? j.equipe : null }));
+  salle.grille = grille;
   const placeKai = salle.kaimaxus ? places[n - 1] : n;
+  salle.placeKai = placeKai;
   // le moteur du groupe : celui du jeu actuel (refait si le site a changé entre-temps)
   if (salle.moteur !== moteur && moteur) salle.moteur = moteur;
   const sim = salle.moteur.sim, S = {};
-  try { sim.activer(S); sim.preparer(salle.circuit, grille, salle.kaimaxus, placeKai); sim.sauver(S);
+  try { sim.activer(S); sim.preparer(salle.circuit, grille, salle.kaimaxus, placeKai, salle.mode); sim.sauver(S);
         // (essais seulement : un Kaimaxus lent, facile à rattraper)
         if (process.env.DX_ESSAI_KAI_LENT) for (const v of S.jeu.voitures) if (v.kaimaxus) v.plafondMulti *= 0.55; }
   catch (e){ diffuser(salle, { t: "refus-course", raison: "Erreur du serveur : " + e.message }); journal("erreur", e); return; }
   salle.sim = sim; salle.S = S; salle.entrees = {}; salle.finiA = 0;
-  diffuser(salle, { t: "depart", type: "depart", v: versionJeu, circuit: salle.circuit, grille, kaimaxus: salle.kaimaxus, placeKai, serveur: true });
+  diffuser(salle, { t: "depart", type: "depart", v: versionJeu, circuit: salle.circuit, grille, kaimaxus: salle.kaimaxus, placeKai, serveur: true,
+                    mode: salle.mode, champ: salle.mode === "championnat" ? { n: salle.champ.n, total: salle.champ.courses.length } : null });
   journal("groupe", salle.code, "course", salle.circuit, n, "voitures");
   // boucle de la course : physique à 60 pas par seconde, état envoyé ~30 fois par seconde
   let t = Date.now(), reste = 0, dernierEnvoi = 0;
@@ -342,6 +433,7 @@ function lancerCourse(salle){
         dernierEnvoi = now;
         const m = JSON.stringify({ t: "e", ts: now, ch: Math.round(sim.chrono() * 1000) / 1000, c: sim.etat() });
         for (const j of salle.joueurs) if (j.c.ouvert && !(j.c.engorge && j.c.engorge())) j.c.envoyer(m);
+        for (const sc of salle.spectateurs || []) if (sc.ouvert && !(sc.engorge && sc.engorge())) sc.envoyer(m);
       }
       // tout le monde est arrivé (ou 90 s après le premier) : la course s'arrête côté serveur
       if (sim.toutFini()){ if (!salle.finiA) salle.finiA = now; if (now - salle.finiA > 8000) finCourse(salle); }
@@ -354,7 +446,36 @@ function lancerCourse(salle){
     } catch (e){ journal("erreur de simulation", e); finCourse(salle); }
   }, 1000 / 60);
 }
+/* Fin de course : le classement officiel (temps, puis distance, puis ordre
+   d'élimination), les points, les équipes et le championnat. */
+function resultatCourse(salle){
+  let r; try { salle.sim.activer(salle.S); r = salle.sim.resultats(); } catch (e) { return null; }
+  r.sort((a, b) => {
+    const ga = a.parti ? 3 : a.tf != null ? 0 : a.elim ? 2 : 1, gb = b.parti ? 3 : b.tf != null ? 0 : b.elim ? 2 : 1;
+    if (ga !== gb) return ga - gb;
+    if (ga === 0) return a.tf - b.tf;
+    if (ga === 2) return b.elim - a.elim;          // éliminé plus tard = mieux classé
+    return b.d - a.d;
+  });
+  const classement = r.map((x, i) => ({ id: x.id, nom: x.nom, place: i + 1, tf: x.tf, elim: x.elim, parti: x.parti, meilleur: x.meilleur,
+                                        pts: x.parti ? 0 : POINTS[i] || 0 }));
+  const res = { t: "resultat", mode: salle.mode, circuit: salle.circuit, classement };
+  if (salle.mode === "equipes"){
+    const eq = {};
+    for (const x of classement){ const g = (salle.grille || []).find(j => j.id === x.id); if (!g || g.equipe == null) continue;
+      (eq[g.equipe] = eq[g.equipe] || { equipe: g.equipe, pts: 0, membres: [] }); eq[g.equipe].pts += x.pts; eq[g.equipe].membres.push(x.nom); }
+    res.equipes = Object.values(eq).sort((a, b) => b.pts - a.pts);
+  }
+  if (salle.mode === "championnat" && salle.champ){
+    const ch = salle.champ;
+    for (const x of classement){ ch.points[x.id] = (ch.points[x.id] || 0) + x.pts; ch.noms[x.id] = x.nom; }
+    ch.n++;
+    res.champ = infoChamp(salle);
+  }
+  return res;
+}
 function finCourse(salle){
+  if (salle.sim){ const res = resultatCourse(salle); if (res){ salle.dernierResultat = res; diffuser(salle, res); } }
   if (salle.boucle) clearInterval(salle.boucle);
   salle.boucle = null; salle.sim = null; salle.S = null; salle.premierA = 0;
   if (salles.has(salle.code)) majSalon(salle);
@@ -413,7 +534,7 @@ serveur.on("upgrade", (req, sock) => {
     }
   });
   connexions.add(c);
-  const fermer = () => { if (!c.ouvert) return; c.ouvert = false; connexions.delete(c); quitter(c); chat.sortir(c); try { sock.end(); } catch (e) {} };
+  const fermer = () => { if (!c.ouvert) return; c.ouvert = false; connexions.delete(c); quitter(c); retirerSpectateur(c); chat.sortir(c); try { sock.end(); } catch (e) {} };
   sock.on("close", fermer); sock.on("error", fermer); sock.on("end", fermer);
 });
 // sans nouvelles depuis 10 s (page fermée, téléphone en veille) : le joueur est sorti

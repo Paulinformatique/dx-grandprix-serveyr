@@ -28,6 +28,7 @@ const relations = new Map();   // "de|vers" (ID) → "demande" | "ami" | "bloque
 const groupes = new Map();     // id → { id, nom, membres: [ID], cree }
 const convs = new Map();       // clé de conversation → [messages] (privée : "p:a|b" trié ; groupe : "g:id")
 const lus = new Map();         // "pseudo|conv vue par lui" → dernier id lu
+const records = new Map();     // "joueur|course|voiture" → { joueur, course, voiture, tf, tour, t } : le classement mondial
 let pret = false, compteurId = 0;
 
 // ID du joueur : 8 chiffres au hasard (le premier n'est jamais 0)
@@ -91,7 +92,7 @@ function sauverFichier(){
   clearTimeout(minuteurFichier);
   minuteurFichier = setTimeout(() => {
     const o = { comptes: [...comptes.values()], relations: [...relations], groupes: [...groupes.values()],
-                messages: [...convs.values()].flat(), lus: [...lus] };
+                messages: [...convs.values()].flat(), lus: [...lus], records: [...records] };
     try { fs.writeFileSync(FICHIER, JSON.stringify(o)); } catch (e) { journal("écriture impossible", e.message); }
   }, 1000);
 }
@@ -110,7 +111,10 @@ async function charger(){
       // les messages : seulement les 20 000 plus récents (les anciens restent dans Supabase)
       const [c, r, g, m, l] = await Promise.all([lireTable("dx_comptes"), lireTable("dx_relations"), lireTable("dx_groupes"),
                                                   lireTable("dx_messages", 20000, "&order=id.desc"), lireTable("dx_lus")]);
-      for (const x of c) comptes.set(String(x.id), { id: String(x.id), nom: x.nom, hash: x.hash, cree: +x.cree, stats: x.stats || null });
+      // le classement mondial (table ajoutée après : absente, on fait sans)
+      try { for (const x of await lireTable("dx_records")) records.set(x.joueur + "|" + x.course + "|" + x.voiture, { joueur: x.joueur, course: x.course, voiture: +x.voiture, tf: +x.tf, tour: x.tour == null ? null : +x.tour, t: +x.t }); }
+      catch (e){ journal("pas de table dx_records :", e.message.slice(0, 80)); }
+      for (const x of c) comptes.set(String(x.id), { id: String(x.id), nom: x.nom, hash: x.hash, cree: +x.cree, stats: x.stats || null, vu: x.vu == null ? null : +x.vu });
       for (const x of r) relations.set(x.de + "|" + x.vers, x.etat);
       for (const x of g) groupes.set(x.id, { id: x.id, nom: x.nom, membres: x.membres || [], cree: +x.cree });
       m.sort((a, b) => a.id - b.id);
@@ -124,6 +128,7 @@ async function charger(){
       for (const x of o.groupes || []) groupes.set(x.id, x);
       for (const x of o.messages || []) rangerMessage(x);
       for (const [k, v] of o.lus || []) lus.set(k, v);
+      for (const [k, v] of o.records || []) records.set(k, v);
       journal("fichier :", comptes.size, "comptes");
     } else journal(supa ? "" : "pas de Supabase configuré : les messages seront perdus au redémarrage");
   } catch (e){ journal("chargement impossible :", e.message); }
@@ -160,7 +165,9 @@ function filtrer(texte){
 
 /* ───────────── Connexions ───────────── */
 const enLigne = new Map();      // pseudo → Set de connexions
-const dernierVu = new Map();    // pseudo → heure
+// dernière fois en ligne : gardée dans le compte (et dans Supabase), donc même après un redémarrage
+const dernierVu = { get: id => (comptes.get(id) || {}).vu || null, set: (id, t) => { const x = comptes.get(id); if (!x) return;
+  x.vu = t; ecrire({ f: "maj", t: "dx_comptes", ou: { id }, l: { vu: t } }); } };
 const envoyer = (c, o) => { if (c && c.ouvert) c.envoyer(JSON.stringify(o)); };
 const aTous = (pseudo, o) => { const s = enLigne.get(pseudo); if (s) for (const c of s) envoyer(c, o); };
 const rel = (a, b) => relations.get(a + "|" + b);
@@ -189,7 +196,7 @@ function nonLus(p){
   return r;
 }
 function etatDe(p){
-  const amisL = amis(p).map(a => ({ id: a, nom: nomDe(a), enLigne: enLigne.has(a), vu: dernierVu.get(a) || null }));
+  const amisL = amis(p).map(a => ({ id: a, nom: nomDe(a), enLigne: enLigne.has(a), vu: dernierVu.get(a) || null, enCourse: enLigne.has(a) && !!enCourseDe(a) }));
   const demandes = [...relations].filter(([k, v]) => v === "demande" && k.endsWith("|" + p)).map(([k]) => qui(k.split("|")[0]));
   const envoyees = [...relations].filter(([k, v]) => v === "demande" && k.startsWith(p + "|")).map(([k]) => qui(k.split("|")[1]));
   const bloques = [...relations].filter(([k, v]) => v === "bloque" && k.startsWith(p + "|")).map(([k]) => qui(k.split("|")[1]));
@@ -207,6 +214,16 @@ function etatDe(p){
 const majEtat = p => { if (enLigne.has(p)) aTous(p, etatDe(p)); };
 function presence(p, enL){
   for (const a of amis(p)) aTous(a, { t: "c-presence", id: p, enLigne: enL, vu: dernierVu.get(p) || null });
+}
+
+// tous les temps d'une course (une voiture, ou toutes : le meilleur de chacun), du plus rapide au plus lent
+function classementMondial(course, voiture){
+  const meilleur = new Map();
+  for (const x of records.values()){
+    if (x.course !== course || (voiture >= 0 && x.voiture !== voiture) || !comptes.has(x.joueur)) continue;
+    const a = meilleur.get(x.joueur); if (!a || x.tf < a.tf) meilleur.set(x.joueur, x);
+  }
+  return [...meilleur.values()].sort((a, b) => a.tf - b.tf);
 }
 
 /* ───────────── Stats du profil (venant du jeu : on ne garde que des valeurs simples) ───────────── */
@@ -238,8 +255,18 @@ function renommer(id, nom){
   majEtat(id); for (const a of amis(id)) majEtat(a);
 }
 
+// où joue chacun (son groupe multijoueur), pour le bouton « Visionner »
+const statuts = new Map();       // ID → { code, idJeu }
+let sallesJeu = null;
+function enCourseDe(id){
+  const st = statuts.get(id); if (!st || !sallesJeu) return null;
+  const salle = sallesJeu.get(st.code);
+  if (!salle || !salle.sim || !salle.joueurs.some(j => j.id === st.idJeu)) return null;
+  return { code: st.code, idJeu: st.idJeu, circuit: salle.circuit };
+}
 async function recevoir(c, d, ctx){
   await chargement;
+  if (ctx && ctx.salles) sallesJeu = ctx.salles;
   if (d.t === "c-entrer"){
     const cle = String(d.cle || ""), idDemande = String(d.id || "").replace(/[#\s]/g, ""), nom = nomPropre(d.nom);
     if (cle.length < 16) return refus(c, "Code secret invalide.");
@@ -275,6 +302,11 @@ async function recevoir(c, d, ctx){
   }
 
   if (d.t === "c-nom"){ renommer(p, nomPropre(d.nom)); return; }
+  if (d.t === "c-statut"){
+    const code = String(d.code || "").toUpperCase(), idJeu = String(d.idJeu || "").slice(0, 20);
+    if (/^[A-Z]{5}$/.test(code) && idJeu) statuts.set(p, { code, idJeu }); else statuts.delete(p);
+    return;
+  }
   // les stats du jeu (courses ouvertes, voitures…), pour que les autres voient son profil
   if (d.t === "c-stats"){
     const st = statsPropres(d.stats); if (!st) return;
@@ -285,13 +317,35 @@ async function recevoir(c, d, ctx){
     else { clearTimeout(x.minStats); x.minStats = setTimeout(() => { x.statsEcrites = Date.now(); ecrire({ f: "maj", t: "dx_comptes", ou: { id: p }, l: { stats: x.stats } }); }, 20000); }
     return;
   }
+  /* Classement mondial : le meilleur temps de course de chacun, par course
+     et par voiture (une course solo terminée l'envoie). */
+  if (d.t === "c-record"){
+    const course = String(d.course || "").slice(0, 40), voiture = +d.voiture | 0, tf = +d.tf, tour = d.tour == null ? null : +d.tour;
+    if (!course || voiture < 0 || voiture > 40 || !(tf > 20 && tf < 3600) || (tour != null && !(tour > 5 && tour < tf))) return;
+    const k = p + "|" + course + "|" + voiture, avant = records.get(k);
+    if (!avant || tf < avant.tf || (tour != null && (avant.tour == null || tour < avant.tour))){
+      const x = { joueur: p, course, voiture, tf: avant ? Math.min(avant.tf, tf) : tf, tour: avant && avant.tour != null && (tour == null || avant.tour < tour) ? avant.tour : tour, t: now };
+      records.set(k, x); ecrire({ f: "upsert", t: "dx_records", conflit: "joueur,course,voiture", l: [x] });
+    }
+    const cl = classementMondial(course, voiture), rang = cl.findIndex(x => x.joueur === p) + 1;
+    envoyer(c, { t: "c-rang", course, voiture, rang, total: cl.length, tf: records.get(k).tf, nouveau: !avant || tf < avant.tf });
+    return;
+  }
+  if (d.t === "c-classement"){
+    const course = String(d.course || "").slice(0, 40), voiture = d.voiture == null || d.voiture === "" || +d.voiture < 0 ? -1 : +d.voiture | 0;
+    const cl = classementMondial(course, voiture), rang = cl.findIndex(x => x.joueur === p);
+    const ligne = (x, i) => ({ rang: i + 1, id: x.joueur, nom: nomDe(x.joueur), voiture: x.voiture, tf: x.tf, tour: x.tour, ami: rel(p, x.joueur) === "ami" });
+    envoyer(c, { t: "c-classement", course, voiture, total: cl.length, top: cl.slice(0, 50).map(ligne), moi: rang >= 0 ? ligne(cl[rang], rang) : null });
+    return;
+  }
   if (d.t === "c-profil"){
     const q = canon(d.id);
     if (!q) return refus(c, "Aucun joueur avec l'ID « " + String(d.id || "").slice(0, 16) + " ».");
     if (rel(q, p) === "bloque") return refus(c, "Profil indisponible.");
     const x = comptes.get(q), ami = rel(p, q) === "ami";
     envoyer(c, { t: "c-profil", id: q, nom: x.nom, stats: x.stats || null, cree: x.cree, ami, moi: q === p,
-                 demande: rel(p, q) === "demande", enLigne: ami || q === p ? enLigne.has(q) : null, vu: ami ? dernierVu.get(q) || null : null });
+                 demande: rel(p, q) === "demande", enLigne: ami || q === p ? enLigne.has(q) : null, vu: ami ? dernierVu.get(q) || null : null,
+                 enCourse: ami && enLigne.has(q) ? enCourseDe(q) : null });
     return;
   }
   if (d.t === "c-ami-demander"){
@@ -410,6 +464,6 @@ function sortir(c){
   c.joueur = null;
   const s = enLigne.get(p); if (!s) return;
   s.delete(c);
-  if (!s.size){ enLigne.delete(p); dernierVu.set(p, Date.now()); presence(p, false); }
+  if (!s.size){ enLigne.delete(p); statuts.delete(p); dernierVu.set(p, Date.now()); presence(p, false); }
 }
 module.exports = { recevoir, sortir, filtrer, chargement, stats: () => ({ comptes: comptes.size, enLigne: enLigne.size, supabase: supa }) };

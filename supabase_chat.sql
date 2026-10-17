@@ -17,3 +17,10 @@ alter table dx_lus       enable row level security;
 
 -- Profils (ajouté après) : les stats du jeu de chaque joueur
 alter table dx_comptes add column if not exists stats jsonb;
+
+-- Classement mondial (ajouté après) : le meilleur temps de chacun par course et par voiture
+create table if not exists dx_records (joueur text not null, course text not null, voiture int not null, tf double precision not null, tour double precision, t bigint, primary key (joueur, course, voiture));
+alter table dx_records enable row level security;
+
+-- Dernière connexion (ajouté après)
+alter table dx_comptes add column if not exists vu bigint;
