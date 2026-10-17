@@ -321,7 +321,9 @@ async function recevoir(c, d, ctx){
      et par voiture (une course solo terminée l'envoie). */
   if (d.t === "c-record"){
     const course = String(d.course || "").slice(0, 40), voiture = +d.voiture | 0, tf = +d.tf, tour = d.tour == null ? null : +d.tour;
-    if (!course || voiture < 0 || voiture > 40 || !(tf > 20 && tf < 3600) || (tour != null && !(tour > 5 && tour < tf))) return;
+    // (voiture 99 : un temps fait avant le classement mondial, on ne sait pas avec quelle voiture)
+    if (!course || voiture < 0 || (voiture > 40 && voiture !== 99) || !(tf > 20 && tf < 3600) || (tour != null && !(tour > 5 && tour < tf))) return;
+    if (d.ancien){ const k0 = p + "|" + course + "|99", a0 = records.get(k0); if (!a0 || tf < a0.tf){ const x = { joueur: p, course, voiture: 99, tf, tour, t: now }; records.set(k0, x); ecrire({ f: "upsert", t: "dx_records", conflit: "joueur,course,voiture", l: [x] }); } return; }
     const k = p + "|" + course + "|" + voiture, avant = records.get(k);
     if (!avant || tf < avant.tf || (tour != null && (avant.tour == null || tour < avant.tour))){
       const x = { joueur: p, course, voiture, tf: avant ? Math.min(avant.tf, tf) : tf, tour: avant && avant.tour != null && (tour == null || avant.tour < tour) ? avant.tour : tour, t: now };
