@@ -3,7 +3,7 @@
 -- est activée sans aucune règle, donc la clé publique du jeu ne peut RIEN lire ici.
 drop table if exists dx_comptes, dx_relations, dx_groupes, dx_messages, dx_lus;
 
-create table dx_comptes   (id text primary key, nom text not null, hash text not null, cree bigint);
+create table dx_comptes   (id text primary key, nom text not null, hash text not null, cree bigint, stats jsonb);
 create table dx_relations (de text not null, vers text not null, etat text not null, primary key (de, vers));
 create table dx_groupes   (id text primary key, nom text, membres jsonb, cree bigint);
 create table dx_messages  (id bigint primary key, de text not null, vers text not null, texte text not null, t bigint, img text);
@@ -14,3 +14,6 @@ alter table dx_relations enable row level security;
 alter table dx_groupes   enable row level security;
 alter table dx_messages  enable row level security;
 alter table dx_lus       enable row level security;
+
+-- Profils (ajouté après) : les stats du jeu de chaque joueur
+alter table dx_comptes add column if not exists stats jsonb;

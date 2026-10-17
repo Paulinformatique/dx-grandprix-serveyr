@@ -68,6 +68,9 @@ async function vider(){
       if (op.f === "upsert"){
         url += op.conflit ? "?on_conflict=" + op.conflit : "";
         init = { method: "POST", headers: entetes({ Prefer: "resolution=merge-duplicates,return=minimal" }), body: JSON.stringify(op.l) };
+      } else if (op.f === "maj"){          // PATCH d'une ligne existante (les stats du profil)
+        url += "?" + Object.entries(op.ou).map(([k, v]) => k + "=eq." + encodeURIComponent(v)).join("&");
+        init = { method: "PATCH", headers: entetes({ Prefer: "return=minimal" }), body: JSON.stringify(op.l) };
       } else if (op.f === "suppr"){
         url += "?" + Object.entries(op.ou).map(([k, v]) => k + "=eq." + encodeURIComponent(v)).join("&");
         init = { method: "DELETE", headers: entetes({ Prefer: "return=minimal" }) };
@@ -107,7 +110,7 @@ async function charger(){
       // les messages : seulement les 20 000 plus récents (les anciens restent dans Supabase)
       const [c, r, g, m, l] = await Promise.all([lireTable("dx_comptes"), lireTable("dx_relations"), lireTable("dx_groupes"),
                                                   lireTable("dx_messages", 20000, "&order=id.desc"), lireTable("dx_lus")]);
-      for (const x of c) comptes.set(String(x.id), { id: String(x.id), nom: x.nom, hash: x.hash, cree: +x.cree });
+      for (const x of c) comptes.set(String(x.id), { id: String(x.id), nom: x.nom, hash: x.hash, cree: +x.cree, stats: x.stats || null });
       for (const x of r) relations.set(x.de + "|" + x.vers, x.etat);
       for (const x of g) groupes.set(x.id, { id: x.id, nom: x.nom, membres: x.membres || [], cree: +x.cree });
       m.sort((a, b) => a.id - b.id);
@@ -206,6 +209,17 @@ function presence(p, enL){
   for (const a of amis(p)) aTous(a, { t: "c-presence", id: p, enLigne: enL, vu: dernierVu.get(p) || null });
 }
 
+/* ───────────── Stats du profil (venant du jeu : on ne garde que des valeurs simples) ───────────── */
+function statsPropres(s){
+  if (!s || typeof s !== "object") return null;
+  const n = v => Number.isFinite(+v) ? Math.max(0, Math.min(100000, Math.round(+v))) : 0;
+  const t = v => String(v || "").replace(/[\u0000-\u001f<>]/g, "").slice(0, 40);
+  return { courses: n(s.courses), coursesTotal: n(s.coursesTotal), p2: s.p2 == null ? null : n(s.p2),
+           voitures: n(s.voitures), voituresTotal: n(s.voituresTotal), voiture: t(s.voiture),
+           liste: Array.isArray(s.liste) ? s.liste.slice(0, 60).map(t) : [],
+           jouees: n(s.jouees), podiums: n(s.podiums), victoires: n(s.victoires), maj: Date.now() };
+}
+
 /* ───────────── Messages reçus ───────────── */
 const refus = (c, raison) => envoyer(c, { t: "c-refus", raison });
 // le nom du joueur (celui du jeu) ; vide ou pas convenable : « Joueur 12 »
@@ -217,9 +231,10 @@ function nomParDefaut(){
   let n = 1; for (const x of comptes.values()){ const m = /^Joueur (\d+)$/.exec(x.nom); if (m) n = Math.max(n, +m[1] + 1); }
   return "Joueur " + n;
 }
+const ligneCompte = x => ({ id: x.id, nom: x.nom, hash: x.hash, cree: x.cree });
 function renommer(id, nom){
   const x = comptes.get(id); if (!x || !nom || x.nom === nom) return;
-  x.nom = nom; ecrire({ f: "upsert", t: "dx_comptes", conflit: "id", l: [x] });
+  x.nom = nom; ecrire({ f: "upsert", t: "dx_comptes", conflit: "id", l: [ligneCompte(x)] });
   majEtat(id); for (const a of amis(id)) majEtat(a);
 }
 
@@ -236,7 +251,7 @@ async function recevoir(c, d, ctx){
       if (d.nouveau !== true && !recree) return refus(c, "Aucun compte avec cet ID.");
       compte = { id: recree ? idDemande : nouvelIdJoueur(), nom: nom || nomParDefaut(), hash, cree: Date.now() };
       comptes.set(compte.id, compte);
-      ecrire({ f: "upsert", t: "dx_comptes", conflit: "id", l: [compte] });
+      ecrire({ f: "upsert", t: "dx_comptes", conflit: "id", l: [ligneCompte(compte)] });
       journal("nouveau compte", compte.id, compte.nom);
     } else if (compte.hash !== hash){
       return refus(c, "Mauvais code secret pour cet ID.");
@@ -260,6 +275,25 @@ async function recevoir(c, d, ctx){
   }
 
   if (d.t === "c-nom"){ renommer(p, nomPropre(d.nom)); return; }
+  // les stats du jeu (courses ouvertes, voitures…), pour que les autres voient son profil
+  if (d.t === "c-stats"){
+    const st = statsPropres(d.stats); if (!st) return;
+    const x = comptes.get(p); const avant = JSON.stringify(x.stats || null), apres = JSON.stringify(st);
+    if (avant === apres) return;
+    x.stats = st;
+    if (now - (x.statsEcrites || 0) > 20000){ x.statsEcrites = now; ecrire({ f: "maj", t: "dx_comptes", ou: { id: p }, l: { stats: st } }); }
+    else { clearTimeout(x.minStats); x.minStats = setTimeout(() => { x.statsEcrites = Date.now(); ecrire({ f: "maj", t: "dx_comptes", ou: { id: p }, l: { stats: x.stats } }); }, 20000); }
+    return;
+  }
+  if (d.t === "c-profil"){
+    const q = canon(d.id);
+    if (!q) return refus(c, "Aucun joueur avec l'ID « " + String(d.id || "").slice(0, 16) + " ».");
+    if (rel(q, p) === "bloque") return refus(c, "Profil indisponible.");
+    const x = comptes.get(q), ami = rel(p, q) === "ami";
+    envoyer(c, { t: "c-profil", id: q, nom: x.nom, stats: x.stats || null, cree: x.cree, ami, moi: q === p,
+                 demande: rel(p, q) === "demande", enLigne: ami || q === p ? enLigne.has(q) : null, vu: ami ? dernierVu.get(q) || null : null });
+    return;
+  }
   if (d.t === "c-ami-demander"){
     const q = canon(d.id);
     if (!q) return refus(c, "Aucun joueur avec l'ID « " + String(d.id || "").slice(0, 16) + " ».");
