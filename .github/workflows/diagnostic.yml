@@ -1,0 +1,12 @@
+# Diagnostic (lancé à la main) : affiche l'état du serveur dans les annotations
+name: Diagnostic du serveur
+on: workflow_dispatch
+jobs:
+  etat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: État
+        run: |
+          for i in 1 2 3; do r=$(curl -fsS -m 70 https://dx-grandprix-serveyr.onrender.com/) && break; sleep 10; done
+          echo "::notice::$r"
