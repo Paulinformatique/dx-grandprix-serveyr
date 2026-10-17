@@ -19,6 +19,7 @@
 const http = require("http");
 const crypto = require("crypto");
 const vm = require("vm");
+const chat = require("./chat.js");
 const fs = require("fs");
 
 const PORT = +process.env.PORT || 10000;
@@ -245,6 +246,7 @@ function fermerSalle(salle){
 async function recevoir(c, d){
   if (!d || typeof d !== "object") return;
   if (d.t === "ping"){ envoyer(c, { t: "pong", t0: d.t0 }); return; }
+  if (typeof d.t === "string" && d.t.startsWith("c-")){ await chat.recevoir(c, d, { salles }); return; }
   if (d.t === "creer" || d.t === "rejoindre"){
     // il vient de se réveiller : préparer le jeu prend un moment, on prévient le joueur
     if (!moteur || moteur.version !== versionJeu || d.v !== versionJeu) envoyer(c, { t: "attente" });
@@ -280,6 +282,13 @@ async function recevoir(c, d){
   if (d.t === "quitte"){ quitter(c); return; }
   if (d.t === "abandon"){
     if (salle.sim){ try { salle.sim.activer(salle.S); salle.sim.depart(c.id); salle.sim.sauver(salle.S); } catch (e) {} diffuser(salle, { t: "parti", id: c.id }); }
+    return;
+  }
+  // chat du salon (pas gardé)
+  if (d.t === "salon-msg"){
+    const now = Date.now(); if (now - (c.dernierSalon || 0) < 600) return; c.dernierSalon = now;
+    const j = salle.joueurs.find(x => x.c === c), texte = chat.filtrer(d.texte);
+    if (j && texte) diffuser(salle, { t: "salon-msg", id: j.id, nom: j.nom, coul: j.coul, texte });
     return;
   }
   if (d.t === "in"){ salle.entrees[c.id] = { g: d.g ? 1 : 0, f: d.f ? 1 : 0, d: Math.max(-1, Math.min(1, +d.d || 0)), e: d.e ? 1 : 0 }; return; }
@@ -359,9 +368,12 @@ function trame(texte){
   else { h = Buffer.alloc(10); h[0] = 0x81; h[1] = 127; h.writeBigUInt64BE(BigInt(b.length), 2); }
   return Buffer.concat([h, b]);
 }
+const connexions = new Set();
+// chat sans nouvelles depuis 70 s (le jeu envoie un signe toutes les 25 s) : connexion morte
+setInterval(() => { for (const c of connexions) if (c.chat && Date.now() - c.vu > 70000){ c.ouvert = false; connexions.delete(c); chat.sortir(c); quitter(c); try { c.fermerSock(); } catch (e) {} } }, 10000);
 const serveur = http.createServer((req, res) => {
   res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8", "Access-Control-Allow-Origin": "*" });
-  res.end("DX Grand Prix : serveur multijoueur en marche · version " + versionJeu + " · " + salles.size + " groupe(s)\n");
+  res.end("DX Grand Prix : serveur multijoueur en marche · version " + versionJeu + " · " + salles.size + " groupe(s) · chat " + JSON.stringify(chat.stats()) + "\n");
 });
 serveur.on("upgrade", (req, sock) => {
   const cle = req.headers["sec-websocket-key"];
@@ -372,7 +384,7 @@ serveur.on("upgrade", (req, sock) => {
   const c = { ouvert: true, salle: null, id: null, vu: Date.now(),
     envoyer(t){ if (this.ouvert) try { sock.write(trame(t)); } catch (e) {} },
     // connexion qui n'avale plus (4G faible) : on saute des états plutôt que de les empiler (sinon ils arrivent avec des secondes de retard)
-    engorge(){ return sock.writableLength > 6000; } };
+    engorge(){ return sock.writableLength > 6000; }, fermerSock(){ sock.destroy(); } };
   let buf = Buffer.alloc(0), morceaux = [];
   sock.on("data", d => {
     buf = Buffer.concat([buf, d]);
@@ -400,7 +412,8 @@ serveur.on("upgrade", (req, sock) => {
       }
     }
   });
-  const fermer = () => { if (!c.ouvert) return; c.ouvert = false; quitter(c); try { sock.end(); } catch (e) {} };
+  connexions.add(c);
+  const fermer = () => { if (!c.ouvert) return; c.ouvert = false; connexions.delete(c); quitter(c); chat.sortir(c); try { sock.end(); } catch (e) {} };
   sock.on("close", fermer); sock.on("error", fermer); sock.on("end", fermer);
 });
 // sans nouvelles depuis 10 s (page fermée, téléphone en veille) : le joueur est sorti
