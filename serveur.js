@@ -200,6 +200,12 @@ const AJOUT = String.raw`
      se jouent la victoire. Et s'il ne reste plus qu'une voiture en course
      (les autres éliminées ou parties), elle gagne tout de suite. */
   const eliminer = tours => {
+    // le premier a passé la ligne au dernier tour : la course est finie, les autres sont classés derrière lui tout de suite
+    if (jeu.voitures.some(v => v.tempsFinal != null)){
+      const restants = jeu.voitures.filter(v => !v.parti && !v.elimine && v.tempsFinal == null).sort((x, y) => y.distance - x.distance);
+      restants.forEach((v, i) => { v.tempsFinal = jeu.chrono + 0.001 * (i + 1); v.classeFin = true; if (v.humain) arrivee(v); });
+      return;
+    }
     for (;;){
       const actifs = jeu.voitures.filter(v => !v.parti && !v.elimine && v.tempsFinal == null);
       const personneArrive = jeu.voitures.every(v => v.tempsFinal == null);
