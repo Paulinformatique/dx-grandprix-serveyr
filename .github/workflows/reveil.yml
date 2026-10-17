@@ -1,0 +1,19 @@
+# Garde le serveur Render éveillé (l'offre gratuite s'endort après 15 min sans visite) :
+# GitHub l'appelle toutes les 10 minutes. (GitHub peut lancer la tâche avec un peu de retard.)
+name: Réveil du serveur
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+jobs:
+  reveil:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Appel du serveur
+        run: |
+          for i in 1 2 3; do
+            if curl -fsS -m 70 https://dx-grandprix-serveyr.onrender.com/ ; then exit 0; fi
+            sleep 10
+          done
+          echo "Le serveur n'a pas répondu (il se réveille peut-être)"; exit 0
