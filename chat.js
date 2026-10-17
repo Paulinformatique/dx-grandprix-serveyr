@@ -304,7 +304,10 @@ async function recevoir(c, d, ctx){
   if (d.t === "c-nom"){ renommer(p, nomPropre(d.nom)); return; }
   if (d.t === "c-statut"){
     const code = String(d.code || "").toUpperCase(), idJeu = String(d.idJeu || "").slice(0, 20);
-    if (/^[A-Z]{5}$/.test(code) && idJeu) statuts.set(p, { code, idJeu }); else statuts.delete(p);
+    const avant = JSON.stringify(statuts.get(p) || null);
+    if (/^[A-Z]{5}$/.test(code) && idJeu) statuts.set(p, { code, idJeu, c: d.c ? 1 : 0 }); else statuts.delete(p);
+    // ses amis voient tout de suite « 🏁 en course » (et le bouton Visionner)
+    if (JSON.stringify(statuts.get(p) || null) !== avant) setTimeout(() => { for (const a of amis(p)) majEtat(a); }, 1500);
     return;
   }
   // les stats du jeu (courses ouvertes, voitures…), pour que les autres voient son profil
