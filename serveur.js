@@ -113,13 +113,13 @@ const AJOUT = String.raw`
   SRV.sauver = S => { S.jeu = Object.assign({}, jeu); S.piste = piste; S.demi = DEMI_PISTE; };
   SRV.version = typeof MULTI_VERSION !== "undefined" ? MULTI_VERSION : 0;
   SRV.circuits = () => coursesMulti().map(c => c.nom);
-  SRV.preparer = (nomCircuit, grille, kaimaxus, placeKai, mode, tours, voitures) => {
+  SRV.preparer = (nomCircuit, grille, kaimaxus, placeKai, mode, tours, voitures, gyro) => {
     const i = CIRCUITS.findIndex(c => c.nom === nomCircuit && !c.essai);
     if (i < 0) throw new Error("course inconnue");
     const g = grille.map(j => Object.assign({}, j, { coul: MULTI_COULEURS[j.coul % MULTI_COULEURS.length] }));
     const p = g[0];
     for (const j of g) j.voiture = VOITURES[j.voiture] ? j.voiture | 0 : 0;
-    jeu.multi = { grille: g, moi: p.id, maPlace: p.place, maCouleur: p.coul, monNom: p.nom, kaimaxus: !!kaimaxus, placeKai, maVoiture: p.voiture, mode: mode || "course", tours: tours | 0, voitures: voitures || "m3" };
+    jeu.multi = { grille: g, moi: p.id, maPlace: p.place, maCouleur: p.coul, monNom: p.nom, kaimaxus: !!kaimaxus, placeKai, maVoiture: p.voiture, mode: mode || "course", tours: tours | 0, voitures: voitures || "m3", gyro: !!gyro };
     jeu.modeMulti = mode || "course"; jeu.elimTour = 0; jeu.elimCompte = 0;
     jeu.adversaires = kaimaxus ? ["Kaimaxus"] : [];
     jeu.partieCourse = 1; jeu.circuit = i; jeu.pauseMulti = false;
@@ -142,6 +142,7 @@ const AJOUT = String.raw`
   // nombre de tours : celui du circuit, ou celui imposé (élimination : voitures − 1)
   const toursC = () => (jeu.multi && jeu.multi.tours) || CIRCUITS[jeu.circuit].tours || 1;
   const arrivee = v => {
+    v.gyroT = 0; v.gyroFin = 0;
     const R = VOITURES[v.modeleMulti || 0].R;
     Object.assign(v, { R: Object.assign({}, R, { vmax: R.vmax * 0.5 }), adresse: 0.3, irregulier: 0.02,
       s: v.distance, vlat: 0, trouble: 0, lacetChoc: 0, capLisse: 0, bruit: 0, horsT: 0, ligneIdx: 0, rayonRoue: v.rayonRoue || 0.33, enArrivee: true });
@@ -167,6 +168,8 @@ const AJOUT = String.raw`
       if (v.enArrivee){ majIA(v, dt); continue; }
       const e = E[v.idJ] || {};
       cmd.gaz = e.g ? 1 : 0; cmd.frein = e.f ? 1 : 0; cmd.dir = Math.max(-1, Math.min(1, +e.d || 0)); cmd.dirLisse = v.dirL || 0;
+      // Gyro : un compteur d'appuis sur G (un message perdu ne fait pas rater l'appui)
+      cmd.gyro = (e.y | 0) > (v.gyroVu | 0) ? 1 : 0; v.gyroVu = Math.max(v.gyroVu | 0, e.y | 0);
       if (e.e && v.horsPiste && !(v.retour > 0)) v.retour = 1.0;
       jeu.joueur = v; majJoueur(v, dt); v.dirL = cmd.dirLisse;
       if (v.tour >= toursC() && v.tempsFinal == null){ v.tempsFinal = jeu.chrono; arrivee(v); }
@@ -233,7 +236,8 @@ const AJOUT = String.raw`
   SRV.etat = () => jeu.voitures.map(v => [v.idJ, r3(v.x), r3(v.y), r3(v.z), r3(v.cap), r3(v.tangage), r3(v.roulis), r3(v.braquage),
                                           r3(v.v), r3(v.lat), r3(v.distance), v.tour, v.meilleur == null ? null : r3(v.meilleur),
                                           v.tempsFinal == null ? null : r3(v.tempsFinal), v.horsPiste ? 1 : 0, v.retour > 0 ? 1 : 0,
-                                          v.nPousse || 0, r3(v.deriveX), r3(v.deriveZ), v.elimine ? 1 : 0]);
+                                          v.nPousse || 0, r3(v.deriveX), r3(v.deriveZ), v.elimine ? 1 : 0,
+                                          r3(v.gyroCharge), r3(v.gyroT)]);
   SRV.phase = () => jeu.phase;
   SRV.chrono = () => jeu.chrono;
   SRV.toutFini = () => jeu.voitures.every(v => !v.humain || v.tempsFinal != null || v.parti);
@@ -293,7 +297,7 @@ function infoChamp(salle){
 }
 function infoSalon(salle){
   return { t: "salon", v: versionJeu, code: salle.code, circuit: salle.circuit, kaimaxus: salle.kaimaxus, enCourse: !!salle.sim,
-           mode: salle.mode, voitures: salle.voitures, champ: infoChamp(salle), equipeKai: salle.equipeKai | 0,
+           mode: salle.mode, voitures: salle.voitures, champ: infoChamp(salle), equipeKai: salle.equipeKai | 0, gyro: !!salle.gyro,
            joueurs: salle.joueurs.map(j => ({ id: j.id, nom: j.nom, coul: j.coul, hote: j === salle.joueurs[0], lien: "serveur", equipe: j.equipe, voiture: j.voiture, impose: !!j.impose })) };
 }
 function majSalon(salle){ diffuser(salle, infoSalon(salle)); }
@@ -359,7 +363,7 @@ async function recevoir(c, d){
     (salle.spectateurs = salle.spectateurs || new Set()).add(c); c.specSalle = salle; c.id = "spec-" + nid();
     envoyer(c, { t: "bienvenue", id: c.id, code: salle.code, hote: false, spectateur: true });
     envoyer(c, { t: "depart", type: "depart", v: versionJeu, circuit: salle.circuit, grille: salle.grille, kaimaxus: salle.kaimaxus, placeKai: salle.placeKai,
-                 serveur: true, mode: salle.mode, tours: salle.tours || 0, voitures: salle.voitures, equipeKai: salle.equipeKai | 0, spectateur: true, suivre: String(d.suivre || ""), champ: null });
+                 serveur: true, mode: salle.mode, tours: salle.tours || 0, voitures: salle.voitures, equipeKai: salle.equipeKai | 0, gyro: !!salle.gyro, spectateur: true, suivre: String(d.suivre || ""), champ: null });
     return;
   }
   const salle = c.salle; if (!salle) return;
@@ -376,10 +380,11 @@ async function recevoir(c, d){
     if (j && texte) diffuser(salle, { t: "salon-msg", id: j.id, nom: j.nom, coul: j.coul, texte });
     return;
   }
-  if (d.t === "in"){ salle.entrees[c.id] = { g: d.g ? 1 : 0, f: d.f ? 1 : 0, d: Math.max(-1, Math.min(1, +d.d || 0)), e: d.e ? 1 : 0 }; return; }
+  if (d.t === "in"){ salle.entrees[c.id] = { g: d.g ? 1 : 0, f: d.f ? 1 : 0, d: Math.max(-1, Math.min(1, +d.d || 0)), e: d.e ? 1 : 0, y: Math.max(0, d.y | 0) }; return; }
   if (d.t === "choix" && hote && !salle.sim){
     if (d.circuit && (salle.listeCircuits || []).includes(d.circuit)) salle.circuit = d.circuit;
     if (typeof d.kaimaxus === "boolean") salle.kaimaxus = d.kaimaxus;
+    if (typeof d.gyro === "boolean") salle.gyro = d.gyro;
     if (MODES.includes(d.mode) && d.mode !== salle.mode){ salle.mode = d.mode; salle.champ = null; salle.dernierResultat = null; }
     if (CHOIX_VOITURES.includes(d.voitures)) salle.voitures = d.voitures;
     if (d.nouveauChamp && salle.mode === "championnat") salle.champ = null;
@@ -436,13 +441,13 @@ function lancerCourse(salle){
   if (salle.moteur !== moteur && moteur) salle.moteur = moteur;
   const sim = salle.moteur.sim, S = {};
   try { sim.activer(S); salle.tours = salle.mode === "elimination" ? Math.max(1, n - 1) : 0;
-        sim.preparer(salle.circuit, grille, salle.kaimaxus, placeKai, salle.mode, salle.tours, salle.voitures); sim.sauver(S);
+        sim.preparer(salle.circuit, grille, salle.kaimaxus, placeKai, salle.mode, salle.tours, salle.voitures, salle.gyro); sim.sauver(S);
         // (essais seulement : un Kaimaxus lent, facile à rattraper)
         if (process.env.DX_ESSAI_KAI_LENT) for (const v of S.jeu.voitures) if (v.kaimaxus) v.plafondMulti *= 0.55; }
   catch (e){ diffuser(salle, { t: "refus-course", raison: "Erreur du serveur : " + e.message }); journal("erreur", e); return; }
   salle.sim = sim; salle.S = S; salle.entrees = {}; salle.finiA = 0;
   diffuser(salle, { t: "depart", type: "depart", v: versionJeu, circuit: salle.circuit, grille, kaimaxus: salle.kaimaxus, placeKai, serveur: true,
-                    mode: salle.mode, tours: salle.tours || 0, voitures: salle.voitures, equipeKai: salle.equipeKai | 0, champ: salle.mode === "championnat" ? { n: salle.champ.n, total: salle.champ.courses.length } : null });
+                    mode: salle.mode, tours: salle.tours || 0, voitures: salle.voitures, equipeKai: salle.equipeKai | 0, gyro: !!salle.gyro, champ: salle.mode === "championnat" ? { n: salle.champ.n, total: salle.champ.courses.length } : null });
   journal("groupe", salle.code, "course", salle.circuit, n, "voitures");
   // boucle de la course : physique à 60 pas par seconde, état envoyé ~30 fois par seconde
   let t = Date.now(), reste = 0, dernierEnvoi = 0;
