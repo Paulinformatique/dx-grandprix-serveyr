@@ -455,6 +455,18 @@ async function recevoir(c, d, ctx){
     for (const x of g.membres) majEtat(x);
     return;
   }
+  // renommer le groupe : n'importe quel membre ; tout le monde le voit dans la discussion
+  if (d.t === "c-groupe-renommer"){
+    const g = groupes.get(String(d.id || "")); if (!g || !g.membres.includes(p)) return;
+    const nom = filtrer(d.nom).slice(0, 30).trim(); if (!nom || nom === g.nom) return;
+    g.nom = nom; ecrire({ f: "upsert", t: "dx_groupes", conflit: "id", l: [g] });
+    for (const x of g.membres) majEtat(x);
+    const m = { id: nouvelId(), de: p, vers: "g:" + g.id, texte: "✏️ " + nomDe(p) + " a renommé le groupe : « " + nom + " »", t: now };
+    rangerMessage(m);
+    ecrire({ f: "upsert", t: "dx_messages", conflit: "id", l: [{ id: m.id, de: m.de, vers: m.vers, texte: m.texte, t: m.t }] });
+    for (const x of g.membres) aTous(x, { t: "c-msg", conv: "g:" + g.id, m: avecNom(m) });
+    return;
+  }
   if (d.t === "c-groupe-quitter"){
     const g = groupes.get(String(d.id || "")); if (!g || !g.membres.includes(p)) return;
     g.membres = g.membres.filter(x => x !== p);
