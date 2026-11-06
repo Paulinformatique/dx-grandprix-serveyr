@@ -36,9 +36,11 @@ const journal = (...a) => console.log(new Date().toISOString().slice(11, 19), ..
 /* ───────────────────────── Code du jeu ───────────────────────── */
 let codeJeu = null, versionJeu = 0, chargeA = 0, empreinteJeu = "";
 const courseEnCours = () => [...salles.values()].some(x => x.sim);
+// relire le jeu fige le serveur plusieurs secondes : pas tant qu'un groupe joue ou attend
+const groupesOuverts = () => salles.size > 0;
 async function chargerJeu(forcer){
   // relire le site (9 Mo) fige le serveur un instant : jamais pendant une course, sauf s'il le faut vraiment
-  if (codeJeu && !forcer && (Date.now() - chargeA < 10 * 60 * 1000 || courseEnCours())) return;
+  if (codeJeu && !forcer && (Date.now() - chargeA < 10 * 60 * 1000 || groupesOuverts())) return;
   let html;
   if (GAME_FILE) html = fs.readFileSync(GAME_FILE, "utf8");
   else {
@@ -254,8 +256,10 @@ async function moteurAJour(){
   /* refait quand le code du jeu a changé (même sans changer de version), pour
      que le serveur roule exactement comme les joueurs — mais pas pendant une
      course : ça bloquerait tout le monde plusieurs secondes */
-  if (!moteur || moteur.version !== versionJeu || (moteur.empreinte !== empreinteJeu && !courseEnCours())){
+  if (!moteur || moteur.version !== versionJeu || (moteur.empreinte !== empreinteJeu && !groupesOuverts())){
     const t0 = Date.now();
+    // l'ancien moteur d'abord rendu à la mémoire (deux moteurs ne tiennent pas dans 512 Mo)
+    moteur = null; if (global.gc) global.gc();
     const ctx = environnement();
     vm.runInContext(codeJeu + AJOUT, ctx, { filename: "jeu.js" });
     moteur = { sim: ctx.__srv, version: versionJeu, empreinte: empreinteJeu, circuits: ctx.__srv.circuits() };
@@ -526,7 +530,9 @@ function trame(texte){
 }
 const connexions = new Set();
 // chat sans nouvelles depuis 70 s (le jeu envoie un signe toutes les 25 s) : connexion morte
-setInterval(() => { for (const c of connexions) if (c.chat && Date.now() - c.vu > 70000){ c.ouvert = false; connexions.delete(c); chat.sortir(c); quitter(c); try { c.fermerSock(); } catch (e) {} } }, 10000);
+let dernierTicChat = Date.now();
+setInterval(() => { const fige = Date.now() - dernierTicChat > 15000; dernierTicChat = Date.now(); if (fige) return;
+  for (const c of connexions) if (c.chat && Date.now() - c.vu > 70000){ c.ouvert = false; connexions.delete(c); chat.sortir(c); quitter(c); try { c.fermerSock(); } catch (e) {} } }, 10000);
 const serveur = http.createServer((req, res) => {
   res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8", "Access-Control-Allow-Origin": "*" });
   res.end("DX Grand Prix : serveur multijoueur en marche · version " + versionJeu + " · " + salles.size + " groupe(s) · chat " + JSON.stringify(chat.stats()) + "\n");
@@ -572,11 +578,19 @@ serveur.on("upgrade", (req, sock) => {
   const fermer = () => { if (!c.ouvert) return; c.ouvert = false; connexions.delete(c); quitter(c); retirerSpectateur(c); chat.sortir(c); try { sock.end(); } catch (e) {} };
   sock.on("close", fermer); sock.on("error", fermer); sock.on("end", fermer);
 });
-// sans nouvelles depuis 10 s (page fermée, téléphone en veille) : le joueur est sorti
+/* Sans nouvelles depuis 20 s (page fermée, téléphone en veille) : le joueur
+   est sorti. Mais si c'est le SERVEUR qui a été figé (offre gratuite : petit
+   processeur, mémoire pleine, jeu rechargé), les messages des joueurs sont
+   restés en attente : on ne met personne dehors, on repart de maintenant. */
+let dernierTic = Date.now();
 setInterval(() => {
+  const now = Date.now(), ecart = now - dernierTic; dernierTic = now;
+  if (ecart > 4000){ journal("serveur figé", Math.round(ecart / 1000), "s : personne n'est sorti"); for (const c of connexions) c.vu = now; return; }
   for (const salle of salles.values()) for (const j of salle.joueurs)
-    if (Date.now() - j.c.vu > 10000){ j.c.ouvert = false; quitter(j.c); }
+    if (now - j.c.vu > 20000){ journal("sorti (plus de nouvelles)", j.nom); j.c.ouvert = false; quitter(j.c); }
 }, 2000);
+// la mémoire, une fois par minute dans le journal de Render (512 Mo au maximum)
+setInterval(() => { const m = process.memoryUsage(); journal("mémoire", Math.round(m.rss / 1e6), "Mo ·", salles.size, "groupe(s)"); }, 60000);
 
 // utilisé par les essais : require("./serveur.js") donne le moteur sans lancer le serveur
 if (require.main !== module){ module.exports = { moteurAJour }; return; }
