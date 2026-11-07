@@ -324,11 +324,10 @@ async function recevoir(c, d, ctx){
   }
 
   if (d.t === "c-nom"){ const n = nomPropre(d.nom); if (!(estNomAdmin(n) && idAdmin() && idAdmin() !== p)) renommer(p, n); return; }
-  // boîte à idées : 5 à 200 mots, une idée par heure, rien d'insultant
+  // boîte à idées : 5 à 200 caractères, une idée par heure, rien d'insultant
   if (d.t === "c-idee"){
     const texte = String(d.texte || "").replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, " ").trim().slice(0, 2000);
-    const mots = texte.split(/\s+/).filter(Boolean).length;
-    if (mots < 5 || mots > 200) return envoyer(c, { t: "c-idee-refus", raison: "Ton idée doit faire entre 5 et 200 mots (" + mots + " pour l'instant)." });
+    if (texte.length < 5 || texte.length > 200) return envoyer(c, { t: "c-idee-refus", raison: "Ton idée doit faire entre 5 et 200 caractères (" + texte.length + " pour l'instant)." });
     if (inconvenant(texte)) return envoyer(c, { t: "c-idee-refus", raison: "Ton idée ne peut pas être envoyée : elle ne respecte pas les règles de bienséance." });
     const der = [...idees].reverse().find(m => m.de === p);
     if (der && now - der.t < 3600000) return envoyer(c, { t: "c-idee-refus", raison: "Une idée par heure : tu pourras en envoyer une autre dans " + Math.ceil((3600000 - (now - der.t)) / 60000) + " min." });
