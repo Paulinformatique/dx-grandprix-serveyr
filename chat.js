@@ -92,11 +92,16 @@ function sauverFichier(){
   clearTimeout(minuteurFichier);
   minuteurFichier = setTimeout(() => {
     const o = { comptes: [...comptes.values()], relations: [...relations], groupes: [...groupes.values()],
-                messages: [...convs.values()].flat(), lus: [...lus], records: [...records] };
+                messages: [...convs.values()].flat().concat(idees, parties), lus: [...lus], records: [...records] };
     try { fs.writeFileSync(FICHIER, JSON.stringify(o)); } catch (e) { journal("écriture impossible", e.message); }
   }, 1000);
 }
+/* La boîte à idées et le journal des parties en ligne : rangés à part (pas
+   des discussions), gardés dans la même table que les messages. */
+const idees = [], parties = [];
 function rangerMessage(m){
+  if (m.vers === "x:idee"){ idees.push(m); if (idees.length > 500) idees.shift(); return "x:idee"; }
+  if (m.vers === "x:partie"){ parties.push(m); if (parties.length > 200) parties.shift(); return "x:partie"; }
   const k = m.vers.startsWith("g:") ? m.vers : cleP(m.de, m.vers);
   let l = convs.get(k); if (!l) convs.set(k, l = []);
   l.push(m); if (l.length > MAX_PAR_CONV) l.splice(0, l.length - MAX_PAR_CONV);
@@ -142,6 +147,23 @@ const INSULTES = ["connard", "connasse", "conasse", "salope", "salaud", "pute", 
   "bougnoule", "youpin", "mongol", "attardé", "debile", "débile", "abruti", "bite", "couille", "chatte", "branleur", "branleuse", "suce", "sucer",
   "fuck", "fucking", "bitch", "shit", "dick", "nigger", "nigga", "cunt", "whore", "slut", "retard", "kys", "suicide-toi", "creve", "crève", "merde"];
 const sansAccent = s => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+/* Pas convenable ? Les insultes de la liste, et les pires mots même déguisés
+   (n1gg@, n.e.g.r.o, niiiigga…) : on regarde le texte « tassé ». */
+const PIRES = ["negre", "bougnoul", "youpin", "encul", "salope", "connard", "connass", "fuck", "bitch", "batard"];
+function inconvenant(t){
+  const b = sansAccent(String(t || "").toLowerCase());
+  reInsultes.lastIndex = 0; if (reInsultes.test(b)){ reInsultes.lastIndex = 0; return true; }
+  const tasse = b.replace(/[1!|]/g, "i").replace(/3/g, "e").replace(/[4@]/g, "a").replace(/0/g, "o").replace(/[5$]/g, "s").replace(/[^a-z]/g, "");
+  const serre = tasse.replace(/(.)\1+/g, "$1");             // niiiigga → niga
+  return PIRES.some(m => tasse.includes(m) || serre.includes(m.replace(/(.)\1+/g, "$1")))
+    || /nigg/.test(tasse) || /niga(?!ud)/.test(serre) || /(?<!monte)negro(?!ni)/.test(serre);
+}
+// l'administrateur : le compte « trapezoidululu » le plus ancien (personne d'autre ne peut prendre ce nom)
+const estNomAdmin = n => String(n || "").trim().toLowerCase() === "trapezoidululu";
+function idAdmin(){
+  let a = null; for (const x of comptes.values()) if (estNomAdmin(x.nom) && (!a || x.cree < a.cree)) a = x;
+  return a ? a.id : null;
+}
 const reInsultes = new RegExp("(^|[^a-z0-9])(" + [...new Set(INSULTES.map(x => sansAccent(x.toLowerCase())))]
   .sort((a, b) => b.length - a.length).map(x => x.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&").replace(/ /g, "\\s+")).join("|") + ")(?=$|[^a-z0-9])", "gi");
 function filtrer(texte){
@@ -276,13 +298,13 @@ async function recevoir(c, d, ctx){
       // nouveau compte ; ou bien (« auto ») l'appareil avait ce compte mais le serveur l'a perdu : on le recrée avec le même ID
       const recree = d.nouveau === "auto" && /^\d{8}$/.test(idDemande);
       if (d.nouveau !== true && !recree) return refus(c, "Aucun compte avec cet ID.");
-      compte = { id: recree ? idDemande : nouvelIdJoueur(), nom: nom || nomParDefaut(), hash, cree: Date.now() };
+      compte = { id: recree ? idDemande : nouvelIdJoueur(), nom: (estNomAdmin(nom) && idAdmin()) ? nomParDefaut() : nom || nomParDefaut(), hash, cree: Date.now() };
       comptes.set(compte.id, compte);
       ecrire({ f: "upsert", t: "dx_comptes", conflit: "id", l: [ligneCompte(compte)] });
       journal("nouveau compte", compte.id, compte.nom);
     } else if (compte.hash !== hash){
       return refus(c, "Mauvais code secret pour cet ID.");
-    } else if (nom && nom !== compte.nom) renommer(compte.id, nom);
+    } else if (nom && nom !== compte.nom && !(estNomAdmin(nom) && idAdmin() && idAdmin() !== compte.id)) renommer(compte.id, nom);
     const p = compte.id;
     if (c.joueur && c.joueur !== p) sortir(c);
     c.joueur = p; c.chat = true;
@@ -301,7 +323,35 @@ async function recevoir(c, d, ctx){
     if (c.debit.length > 6) return refus(c, "Doucement ! Attends un peu avant d'envoyer d'autres messages.");
   }
 
-  if (d.t === "c-nom"){ renommer(p, nomPropre(d.nom)); return; }
+  if (d.t === "c-nom"){ const n = nomPropre(d.nom); if (!(estNomAdmin(n) && idAdmin() && idAdmin() !== p)) renommer(p, n); return; }
+  // boîte à idées : 5 à 200 mots, une idée par heure, rien d'insultant
+  if (d.t === "c-idee"){
+    const texte = String(d.texte || "").replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, " ").trim().slice(0, 2000);
+    const mots = texte.split(/\s+/).filter(Boolean).length;
+    if (mots < 5 || mots > 200) return envoyer(c, { t: "c-idee-refus", raison: "Ton idée doit faire entre 5 et 200 mots (" + mots + " pour l'instant)." });
+    if (inconvenant(texte)) return envoyer(c, { t: "c-idee-refus", raison: "Ton idée ne peut pas être envoyée : elle ne respecte pas les règles de bienséance." });
+    const der = [...idees].reverse().find(m => m.de === p);
+    if (der && now - der.t < 3600000) return envoyer(c, { t: "c-idee-refus", raison: "Une idée par heure : tu pourras en envoyer une autre dans " + Math.ceil((3600000 - (now - der.t)) / 60000) + " min." });
+    const m = { id: nouvelId(), de: p, vers: "x:idee", texte, t: now };
+    rangerMessage(m);
+    ecrire({ f: "upsert", t: "dx_messages", conflit: "id", l: [{ id: m.id, de: m.de, vers: m.vers, texte: m.texte, t: m.t }] });
+    journal("idée de", nomDe(p));
+    return envoyer(c, { t: "c-idee-ok" });
+  }
+  // l'espace Trapezoidu : les idées (avec leur auteur), qui est en ligne, les dernières parties
+  if (d.t === "c-admin"){
+    if (p !== idAdmin()) return envoyer(c, { t: "c-admin", refuse: true });
+    const enL = [...enLigne.keys()].map(id => { const ec = enCourseDe(id); return { id, nom: nomDe(id), enCourse: ec ? String(ec.circuit && ec.circuit.nom || ec.circuit || "") : null }; })
+      .sort((a, b) => a.nom.localeCompare(b.nom));
+    const groupesJeu = sallesJeu ? [...sallesJeu.values()].map(x => ({ code: x.code, joueurs: x.joueurs.map(j => j.nom), enCourse: !!x.sim, circuit: String(x.circuit && x.circuit.nom || x.circuit || ""), mode: x.mode || "course" })) : [];
+    const pt = parties.slice(-60).reverse().map(m => { let o = {}; try { o = JSON.parse(m.texte); } catch (e) {} return Object.assign(o, { t: m.t }); });
+    const id2 = idees.slice(-300).reverse().map(m => ({ id: m.id, de: m.de, nom: nomDe(m.de), texte: m.texte, t: m.t }));
+    // tous les comptes : nom, création, dernière venue, et le résumé de leur partie
+    const tous = [...comptes.values()].map(x => { const st = x.stats || {}; return { id: x.id, nom: x.nom, cree: x.cree || null, vu: enLigne.has(x.id) ? Date.now() : dernierVu.get(x.id) || null, enLigne: enLigne.has(x.id),
+      courses: st.courses == null ? null : st.courses, voitures: st.voitures == null ? null : st.voitures, jouees: st.jouees == null ? null : st.jouees, victoires: st.victoires == null ? null : st.victoires }; })
+      .sort((a, b) => (b.vu || 0) - (a.vu || 0));
+    return envoyer(c, { t: "c-admin", enLigne: enL, comptes: comptes.size, groupes: groupesJeu, parties: pt, idees: id2, tous });
+  }
   if (d.t === "c-statut"){
     const code = String(d.code || "").toUpperCase(), idJeu = String(d.idJeu || "").slice(0, 20);
     const avant = JSON.stringify(statuts.get(p) || null);
@@ -346,8 +396,9 @@ async function recevoir(c, d, ctx){
   if (d.t === "c-profil"){
     const q = canon(d.id);
     if (!q) return refus(c, "Aucun joueur avec l'ID « " + String(d.id || "").slice(0, 16) + " ».");
-    if (rel(q, p) === "bloque") return refus(c, "Profil indisponible.");
-    const x = comptes.get(q), ami = rel(p, q) === "ami";
+    const adm = p === idAdmin();                       // Trapezoidu voit tous les profils, en entier
+    if (rel(q, p) === "bloque" && !adm) return refus(c, "Profil indisponible.");
+    const x = comptes.get(q), ami = rel(p, q) === "ami" || adm;
     envoyer(c, { t: "c-profil", id: q, nom: x.nom, stats: x.stats || null, cree: x.cree, ami, moi: q === p,
                  demande: rel(p, q) === "demande", enLigne: ami || q === p ? enLigne.has(q) : null, vu: ami ? dernierVu.get(q) || null : null,
                  enCourse: ami && enLigne.has(q) ? enCourseDe(q) : null });
@@ -483,4 +534,14 @@ function sortir(c){
   s.delete(c);
   if (!s.size){ enLigne.delete(p); statuts.delete(p); dernierVu.set(p, Date.now()); presence(p, false); }
 }
-module.exports = { recevoir, sortir, filtrer, chargement, stats: () => ({ comptes: comptes.size, enLigne: enLigne.size, supabase: supa }) };
+// une course multijoueur finie : dans le journal (pour l'espace Trapezoidu)
+function noterPartie(res){
+  try {
+    const o = { circuit: String(res.circuit && res.circuit.nom || res.circuit || ""), mode: res.mode || "course",
+                joueurs: (res.classement || []).map(x => ({ nom: x.nom, place: x.place, tf: x.tf == null ? null : +(+x.tf).toFixed(3), parti: !!x.parti, elim: x.elim || null })) };
+    const m = { id: nouvelId(), de: "serveur", vers: "x:partie", texte: JSON.stringify(o), t: Date.now() };
+    rangerMessage(m);
+    ecrire({ f: "upsert", t: "dx_messages", conflit: "id", l: [{ id: m.id, de: m.de, vers: m.vers, texte: m.texte, t: m.t }] });
+  } catch (e) { journal("partie non notée :", e.message); }
+}
+module.exports = { recevoir, sortir, filtrer, inconvenant, chargement, noterPartie, stats: () => ({ comptes: comptes.size, enLigne: enLigne.size, supabase: supa }) };

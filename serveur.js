@@ -514,7 +514,7 @@ function resultatCourse(salle){
   return res;
 }
 function finCourse(salle){
-  if (salle.sim){ const res = resultatCourse(salle); if (res){ salle.dernierResultat = res; diffuser(salle, res); } }
+  if (salle.sim){ const res = resultatCourse(salle); if (res){ salle.dernierResultat = res; diffuser(salle, res); chat.noterPartie(res); } }
   if (salle.boucle) clearInterval(salle.boucle);
   salle.boucle = null; salle.sim = null; salle.S = null; salle.premierA = 0;
   if (salles.has(salle.code)) majSalon(salle);
