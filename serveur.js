@@ -429,7 +429,7 @@ async function recevoir(c, d){
 
 function lancerCourse(salle){
   if (salle.moteur !== moteur && moteur) salle.moteur = moteur;
-  // les bots : Kaimaxus (si coché), puis les plus iconiques jusqu'à 18 voitures (si « remplir la grille »)
+  // les bots : Kaimaxus (si coché), puis les plus iconiques jusqu'à 12 voitures (si « remplir la grille »)
   const nomsBots = salle.moteur.sim.botsMulti(salle.joueurs.length, salle.kaimaxus, salle.remplir);
   const n = salle.joueurs.length + nomsBots.length;
   // un bot coûte moins cher qu'un joueur au serveur : il compte pour une demi-voiture
