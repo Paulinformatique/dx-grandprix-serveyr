@@ -28,6 +28,7 @@ const relations = new Map();   // "de|vers" (ID) → "demande" | "ami" | "bloque
 const groupes = new Map();     // id → { id, nom, membres: [ID], cree }
 const convs = new Map();       // clé de conversation → [messages] (privée : "p:a|b" trié ; groupe : "g:id")
 const lus = new Map();         // "pseudo|conv vue par lui" → dernier id lu
+const votes = new Map();       // Community Vote : "idVote|joueur" → numéro de l'option choisie
 const records = new Map();     // "joueur|course|voiture" → { joueur, course, voiture, tf, tour, t } : le classement mondial
 let pret = false, compteurId = 0;
 
@@ -92,14 +93,20 @@ function sauverFichier(){
   clearTimeout(minuteurFichier);
   minuteurFichier = setTimeout(() => {
     const o = { comptes: [...comptes.values()], relations: [...relations], groupes: [...groupes.values()],
-                messages: [...convs.values()].flat().concat(idees, parties), lus: [...lus], records: [...records] };
+                messages: [...convs.values()].flat().concat(idees, parties, votesMsgs), lus: [...lus], records: [...records] };
     try { fs.writeFileSync(FICHIER, JSON.stringify(o)); } catch (e) { journal("écriture impossible", e.message); }
   }, 1000);
 }
 /* La boîte à idées et le journal des parties en ligne : rangés à part (pas
    des discussions), gardés dans la même table que les messages. */
-const idees = [], parties = [];
+const idees = [], parties = [], votesMsgs = [];
 function rangerMessage(m){
+  if (m.vers === "x:vote"){
+    let o = null; try { o = JSON.parse(m.texte); } catch (e) {}
+    const k = o && o.v + "|" + m.de;
+    if (o && !votes.has(k)){ votes.set(k, +o.c | 0); votesMsgs.push(m); }
+    return "x:vote";
+  }
   if (m.vers === "x:idee"){ idees.push(m); if (idees.length > 500) idees.shift(); return "x:idee"; }
   if (m.vers === "x:partie"){ parties.push(m); if (parties.length > 200) parties.shift(); return "x:partie"; }
   const k = m.vers.startsWith("g:") ? m.vers : cleP(m.de, m.vers);
@@ -140,6 +147,49 @@ async function charger(){
   pret = true;
 }
 const chargement = charger();
+
+/* ───────────── Community Vote ─────────────
+   Un vote à la fois, ouvert 48 h puis bloqué. Pour voter : avoir fini au
+   moins 3 courses (un temps envoyé au classement mondial sur 3 courses
+   différentes), une seule voix par compte. Les voix sont gardées dans la
+   table des messages (vers = « x:vote »), comme la boîte à idées.          */
+const H48 = 48 * 3600000;
+const DEBUT_CV1 = +process.env.CV1_DEBUT || Date.UTC(2026, 10, 8, 21, 45);     // 8 novembre 2026, 22 h 45 (Paris) ; CV1_DEBUT : pour les tests
+const VOTES = [
+  { id: "cv1", debut: DEBUT_CV1, fin: DEBUT_CV1 + H48,
+    titre: "Quel circuit doit devenir le prochain circuit à événements ?",
+    texte: "Kujota, Bafisson, Thorson, Easydort… chaque tour y réserve une surprise. BlocusHexa et Vozinhato arrivent bientôt — à vous de choisir celui d'après !",
+    options: ["Cristiano", "Odysseus", "Monocoule", "Fumbulane"] },
+];
+function nbCoursesFinies(p){
+  const cs = new Set();
+  for (const x of records.values()) if (x.joueur === p) cs.add(String(x.course).replace(/ 2$/, ""));
+  return cs.size;
+}
+function resultats(v){
+  const r = v.options.map(() => 0);
+  for (const [k, c] of votes) if (k.startsWith(v.id + "|") && c >= 0 && c < r.length) r[c]++;
+  return r;
+}
+function etatVote(p){
+  const now = Date.now(), finies = nbCoursesFinies(p);
+  const fiche = v => ({ id: v.id, titre: v.titre, texte: v.texte, options: v.options, debut: v.debut, fin: v.fin,
+                        res: resultats(v), monVote: votes.has(v.id + "|" + p) ? votes.get(v.id + "|" + p) : null });
+  const actif = VOTES.find(v => now >= v.debut && now < v.fin);
+  const passes = VOTES.filter(v => now >= v.fin).sort((a, b) => b.fin - a.fin).map(fiche);
+  return { t: "c-vote", maintenant: now, actif: actif ? fiche(actif) : null, passes, finies, eligible: finies >= 3 };
+}
+// les résultats en direct : à tous ceux qui sont connectés (au plus une fois par seconde)
+let minuteurVote = null;
+function diffuserVote(){
+  if (minuteurVote) return;
+  minuteurVote = setTimeout(() => {
+    minuteurVote = null;
+    const now = Date.now(), v = VOTES.find(x => now >= x.debut && now < x.fin); if (!v) return;
+    const o = { t: "c-vote-res", id: v.id, res: resultats(v) };
+    for (const s of enLigne.values()) for (const c of s) envoyer(c, o);
+  }, 1000);
+}
 
 /* ───────────── Filtre ───────────── */
 const INSULTES = ["connard", "connasse", "conasse", "salope", "salaud", "pute", "putain", "encule", "enculé", "enfoiré", "enfoire",
@@ -323,6 +373,22 @@ async function recevoir(c, d, ctx){
     if (c.debit.length > 6) return refus(c, "Doucement ! Attends un peu avant d'envoyer d'autres messages.");
   }
 
+  if (d.t === "c-vote-etat") return envoyer(c, etatVote(p));
+  if (d.t === "c-voter"){
+    const v = VOTES.find(x => x.id === d.id), choix = +d.choix;
+    const non = raison => envoyer(c, Object.assign(etatVote(p), { refus: raison }));
+    if (!v) return non("Ce vote n'existe pas.");
+    if (now < v.debut || now >= v.fin) return non("Le vote est terminé : les votes sont bloqués.");
+    if (!Number.isInteger(choix) || choix < 0 || choix >= v.options.length) return non("Choix invalide.");
+    if (nbCoursesFinies(p) < 3) return non("Pour voter, termine d'abord les 3 premières courses.");
+    if (votes.has(v.id + "|" + p)) return non("Tu as déjà voté.");
+    const m = { id: nouvelId(), de: p, vers: "x:vote", texte: JSON.stringify({ v: v.id, c: choix }), t: now };
+    rangerMessage(m);
+    ecrire({ f: "upsert", t: "dx_messages", conflit: "id", l: [{ id: m.id, de: m.de, vers: m.vers, texte: m.texte, t: m.t }] });
+    journal("vote de", nomDe(p), v.id, v.options[choix]);
+    diffuserVote();
+    return envoyer(c, Object.assign(etatVote(p), { ok: true }));
+  }
   if (d.t === "c-nom"){ const n = nomPropre(d.nom); if (!(estNomAdmin(n) && idAdmin() && idAdmin() !== p)) renommer(p, n); return; }
   // boîte à idées : 5 à 200 caractères, une idée par heure, rien d'insultant
   if (d.t === "c-idee"){
