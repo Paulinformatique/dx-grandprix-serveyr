@@ -50,7 +50,10 @@ async function chargerJeu(forcer){
   }
   const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]);
   if (!scripts.length) throw new Error("script du jeu introuvable");
-  const code = scripts.reduce((a, b) => (b.length > a.length ? b : a));
+  /* le serveur ne dessine rien : les modèles 3D (longues chaînes base64) sont
+     vidés avant de charger le jeu, sinon il ne tient plus dans sa mémoire
+     (512 Mo sur l'offre gratuite) et plante au réveil */
+  const code = scripts.reduce((a, b) => (b.length > a.length ? b : a)).replace(/"[A-Za-z0-9+/=]{4000,}"/g, '"' + "A".repeat(43) + '="');      // (un modèle vide : 0 sommet, 0 triangle)
   const m = code.match(/const MULTI_VERSION = (\d+)/);
   let h = 0; for (let i = 0; i < code.length; i += 7) h = (h * 31 + code.charCodeAt(i)) | 0;
   codeJeu = code; versionJeu = m ? +m[1] : 0; chargeA = Date.now(); empreinteJeu = code.length + ":" + h;
@@ -612,5 +615,5 @@ setInterval(() => { const m = process.memoryUsage(); journal("mémoire", Math.ro
 if (require.main !== module){ module.exports = { moteurAJour }; return; }
 serveur.listen(PORT, () => {
   journal("serveur DX Grand Prix sur le port", PORT);
-  moteurAJour().catch(e => journal("jeu pas encore chargé :", e.message));
+  moteurAJour().catch(e => journal("jeu pas encore chargé :", e.message, (e.stack || "").split("\n").slice(1, 4).join(" | ")));
 });
