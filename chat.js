@@ -154,7 +154,7 @@ const chargement = charger();
    différentes), une seule voix par compte. Les voix sont gardées dans la
    table des messages (vers = « x:vote »), comme la boîte à idées.          */
 const H48 = 48 * 3600000;
-const DEBUT_CV1 = +process.env.CV1_DEBUT || Date.UTC(2026, 10, 8, 21, 45);     // 8 novembre 2026, 22 h 45 (Paris) ; CV1_DEBUT : pour les tests
+const DEBUT_CV1 = +process.env.CV1_DEBUT || Date.UTC(2026, 10, 8, 21, 30);     // 8 novembre 2026, 22 h 30 (Paris) ; CV1_DEBUT : pour les tests
 const VOTES = [
   { id: "cv1", debut: DEBUT_CV1, fin: DEBUT_CV1 + H48,
     titre: "Quel circuit doit devenir le prochain circuit à événements ?",
