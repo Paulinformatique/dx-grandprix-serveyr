@@ -53,7 +53,8 @@ async function chargerJeu(forcer){
   /* le serveur ne dessine rien : les modèles 3D (longues chaînes base64) sont
      vidés avant de charger le jeu, sinon il ne tient plus dans sa mémoire
      (512 Mo sur l'offre gratuite) et plante au réveil */
-  const code = scripts.reduce((a, b) => (b.length > a.length ? b : a)).replace(/"[A-Za-z0-9+/=]{4000,}"/g, '"' + "A".repeat(43) + '="');      // (un modèle vide : 0 sommet, 0 triangle)
+  // le script du jeu (celui qui a MULTI_VERSION ; avant, le plus long — mais celui des animations grossit)
+  const code = (scripts.find(x => x.includes("const MULTI_VERSION")) || scripts.reduce((a, b) => (b.length > a.length ? b : a))).replace(/"[A-Za-z0-9+/=]{4000,}"/g, '"' + "A".repeat(43) + '="');      // (un modèle vide : 0 sommet, 0 triangle)
   const m = code.match(/const MULTI_VERSION = (\d+)/);
   let h = 0; for (let i = 0; i < code.length; i += 7) h = (h * 31 + code.charCodeAt(i)) | 0;
   codeJeu = code; versionJeu = m ? +m[1] : 0; chargeA = Date.now(); empreinteJeu = code.length + ":" + h;
