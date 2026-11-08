@@ -158,7 +158,7 @@ const DEBUT_CV1 = +process.env.CV1_DEBUT || Date.UTC(2026, 10, 8, 21, 30);     /
 const VOTES = [
   { id: "cv1", debut: DEBUT_CV1, fin: DEBUT_CV1 + H48,
     titre: "Quel circuit doit devenir le prochain circuit à événements ?",
-    texte: "Kujota, Bafisson, Thorson, Easydort… chaque tour y réserve une surprise. BlocusHexa et Vozinhato arrivent bientôt — à vous de choisir celui d'après !",
+    texte: "Kujota, SteelBallSon, Bafisson, Thorson, Easydort… chaque tour y réserve une surprise. BlocusHexa et Vozinhato arrivent bientôt — à vous de choisir celui d'après !",
     options: ["Cristiano", "Odysseus", "Monocoule", "Fumbulane"] },
 ];
 function nbCoursesFinies(p){
