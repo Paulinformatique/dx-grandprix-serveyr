@@ -168,9 +168,14 @@ const AJOUT = String.raw`
       return;
     }
     if (jeu.phase !== "course") return;
+    // ZA WARUDO (Kujota) : le temps ralentit, s'arrête pendant la roue, puis seul l'élu roule
+    const zw = typeof zaWarudo === "function" && typeof etatZaWarudoK === "function" ? zaWarudo(dt) : null;
+    if (zw === "roue") return;
+    if (zw === "appel") dt *= jeu.zw.echelle;
     jeu.chrono += dt;
     const H = [];
     for (const v of jeu.voitures){
+      if (zw === "arret" && v !== jeu.zw.elu) continue;              // figé
       v.tempsTour += dt;
       if (v.parti) continue;                         // parti ou éliminé : sa voiture ne bouge plus
       if (!v.humain){ majIA(v, dt); continue; }
@@ -251,6 +256,7 @@ const AJOUT = String.raw`
                                           r3(v.gyroCharge), r3(v.gyroT)]);
   SRV.phase = () => jeu.phase;
   // Kujota : quand Hierophant Green a lancé ses émeraudes (chrono du serveur) et lesquelles sont cassées
+  SRV.extraZ = () => typeof etatZaWarudoK === "function" ? etatZaWarudoK() : null;
   SRV.extraK = () => jeu.lancerK && jeu.obstK && jeu.obstK.emeraudes ? [r3(jeu.lancerK.t0), jeu.obstK.emeraudes.filter(e => e.casse != null).map(e => e.id)] : null;
   SRV.chrono = () => jeu.chrono;
   SRV.toutFini = () => jeu.voitures.every(v => !v.humain || v.tempsFinal != null || v.parti);
@@ -492,8 +498,8 @@ function lancerCourse(salle){
       while (reste >= PAS){ sim.etape(PAS, salle.entrees); reste -= PAS; }
       if (now - dernierEnvoi >= ENVOI_MS){
         dernierEnvoi = now;
-        const k = sim.extraK ? sim.extraK() : null;
-        const m = JSON.stringify(Object.assign({ t: "e", ts: now, ch: Math.round(sim.chrono() * 1000) / 1000, c: sim.etat() }, k ? { k } : {}));
+        const k = sim.extraK ? sim.extraK() : null, z = sim.extraZ ? sim.extraZ() : null;
+        const m = JSON.stringify(Object.assign({ t: "e", ts: now, ch: Math.round(sim.chrono() * 1000) / 1000, c: sim.etat() }, k ? { k } : {}, z ? { z } : {}));
         for (const j of salle.joueurs) if (j.c.ouvert && !(j.c.engorge && j.c.engorge())) j.c.envoyer(m);
         for (const sc of salle.spectateurs || []) if (sc.ouvert && !(sc.engorge && sc.engorge())) sc.envoyer(m);
       }
