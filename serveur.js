@@ -440,6 +440,14 @@ async function recevoir(c, d){
     const j = salle.joueurs.find(x => x.c === c); if (!j || j.impose) return;
     const v = +d.voiture | 0; j.voiture = v >= 0 && v < NB_VOITURES ? v : 0; majSalon(salle); return;
   }
+  // l'hôte retire quelqu'un du groupe
+  if (d.t === "virer" && hote && typeof d.id === "string"){
+    const j = salle.joueurs.find(x => x.id === d.id); if (!j || j.c === c) return;
+    const cj = j.c; quitter(cj);
+    envoyer(cj, { t: "refus", raison: "L'hôte t'a retiré du groupe." });
+    journal("groupe", salle.code, ":", j.nom, "retiré par l'hôte");
+    return;
+  }
   if (d.t === "lancer" && hote && !salle.sim){ lancerCourse(salle); return; }
   if (d.t === "retour" && hote){ finCourse(salle); return; }
 }
