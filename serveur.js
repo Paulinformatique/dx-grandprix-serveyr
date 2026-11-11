@@ -316,11 +316,31 @@ function infoChamp(salle){
   const general = Object.entries(ch.points).map(([id, pts]) => ({ id, nom: ch.noms[id] || "?", pts })).sort((a, b) => b.pts - a.pts);
   return { courses: ch.courses, n: ch.n, fini: ch.n >= ch.courses.length, general };
 }
+/* ───── Partie rapide ─────
+   Un joueur appuie sur « Partie rapide » : il entre dans une course ouverte
+   par le serveur (celle qui a le plus de monde et pas encore partie), ou le
+   serveur en ouvre une. Pas d'hôte : circuit tiré au sort, chacun sa voiture,
+   des bots pour remplir la grille, départ automatique (30 s pour laisser
+   d'autres joueurs arriver). Après la course, la suivante repart toute seule. */
+const RAPIDE_ATTENTE = +process.env.RAPIDE_ATTENTE || 30000, RAPIDE_ENTRE = +process.env.RAPIDE_ENTRE || 35000;     // (variables : pour les essais)
+function circuitAuHasard(liste, sauf){
+  const l = (liste || []).filter(c => c !== sauf); return l.length ? l[Math.floor(Math.random() * l.length)] : (liste || [])[0];
+}
+setInterval(() => {
+  const now = Date.now();
+  for (const salle of salles.values()){
+    if (!salle.rapide || salle.sim || !salle.joueurs.length || now < salle.departA) continue;
+    salle.departA = now + 20000;            // (si le serveur est plein, on réessaie dans 20 s)
+    try { lancerCourse(salle); } catch (e) { journal("erreur partie rapide", e); }
+    if (!salle.sim) majSalon(salle);
+  }
+}, 1000);
 function infoSalon(salle){
   return { t: "salon", v: versionJeu, code: salle.code, circuit: salle.circuit, kaimaxus: salle.kaimaxus, enCourse: !!salle.sim,
+           rapide: !!salle.rapide, departDans: salle.rapide && !salle.sim ? Math.max(0, salle.departA - Date.now()) : null,
            remplir: !!salle.remplir, equipesBots: salle.equipesBots || {},
            mode: salle.mode, voitures: salle.voitures, champ: infoChamp(salle), equipeKai: salle.equipeKai | 0, gyro: !!salle.gyro,
-           joueurs: salle.joueurs.map(j => ({ id: j.id, nom: j.nom, coul: j.coul, hote: j === salle.joueurs[0], lien: "serveur", equipe: j.equipe, voiture: j.voiture, impose: !!j.impose })) };
+           joueurs: salle.joueurs.map(j => ({ id: j.id, nom: j.nom, coul: j.coul, hote: !salle.rapide && j === salle.joueurs[0], lien: "serveur", equipe: j.equipe, voiture: j.voiture, impose: !!j.impose })) };
 }
 function majSalon(salle){ diffuser(salle, infoSalon(salle)); }
 
@@ -345,7 +365,7 @@ async function recevoir(c, d){
   if (!d || typeof d !== "object") return;
   if (d.t === "ping"){ envoyer(c, { t: "pong", t0: d.t0 }); return; }
   if (typeof d.t === "string" && d.t.startsWith("c-")){ await chat.recevoir(c, d, { salles }); return; }
-  if (d.t === "creer" || d.t === "rejoindre"){
+  if (d.t === "creer" || d.t === "rejoindre" || d.t === "rapide"){
     // il vient de se réveiller : préparer le jeu prend un moment, on prévient le joueur
     if (!moteur || moteur.version !== versionJeu || d.v !== versionJeu) envoyer(c, { t: "attente" });
     try { await chargerJeu(); if (d.v !== versionJeu) await chargerJeu(true); await moteurAJour(); }
@@ -353,6 +373,24 @@ async function recevoir(c, d){
     if (d.v !== versionJeu){ envoyer(c, { t: "refus", raison: "Ta version du jeu n'est pas la même que celle du site : recharge la page (sur téléphone, ferme et rouvre l'onglet)." }); return; }
     quitter(c);
     const nom = String(d.nom || "Joueur").slice(0, 16);
+    if (d.t === "rapide"){
+      let salle = [...salles.values()].filter(x => x.rapide && !x.sim && x.joueurs.length < MAX_JOUEURS).sort((a, b) => b.joueurs.length - a.joueurs.length)[0];
+      if (!salle){
+        let code; do code = codeAleatoire(); while (salles.has(code));
+        salle = { code, rapide: true, joueurs: [], circuit: circuitAuHasard(moteur.circuits), listeCircuits: moteur.circuits, moteur, kaimaxus: true, equipeKai: 1, remplir: true,
+                  equipesBots: {}, sim: null, S: null, boucle: null, entrees: {}, mode: "course", voitures: "garage", champ: null, paquet: [], gyro: false, departA: Date.now() + RAPIDE_ATTENTE };
+        salles.set(code, salle);
+        journal("partie rapide", code, "ouverte par", nom);
+      }
+      const prises = new Set(salle.joueurs.map(x => x.coul)); let coul = 0; while (prises.has(coul)) coul++;
+      const j = { id: nid(), nom, coul: coul % COULEURS, c, equipe: salle.joueurs.length % 2, voiture: 0 };
+      salle.joueurs.push(j); c.salle = salle; c.id = j.id;
+      // un nouveau venu a le temps de choisir sa voiture et de charger le circuit ; groupe plein : on part vite
+      salle.departA = salle.joueurs.length >= MAX_JOUEURS ? Math.min(salle.departA, Date.now() + 5000) : Math.max(salle.departA, Date.now() + 10000);
+      envoyer(c, { t: "bienvenue", id: j.id, code: salle.code, hote: false, rapide: true });
+      majSalon(salle);
+      return;
+    }
     if (d.t === "creer"){
       let code; do code = codeAleatoire(); while (salles.has(code));
       const salle = { code, joueurs: [], circuit: moteur.circuits[0], listeCircuits: moteur.circuits, moteur, kaimaxus: true, equipeKai: 1, remplir: false, equipesBots: {}, sim: null, S: null, boucle: null, entrees: {},
@@ -389,7 +427,7 @@ async function recevoir(c, d){
     return;
   }
   const salle = c.salle; if (!salle) return;
-  const hote = salle.joueurs[0] && salle.joueurs[0].c === c;
+  const hote = !salle.rapide && salle.joueurs[0] && salle.joueurs[0].c === c;
   if (d.t === "quitte"){ quitter(c); return; }
   if (d.t === "abandon"){
     if (salle.sim){ try { salle.sim.activer(salle.S); salle.sim.depart(c.id); salle.sim.sauver(salle.S); } catch (e) {} diffuser(salle, { t: "parti", id: c.id }); }
@@ -546,6 +584,8 @@ function finCourse(salle){
   if (salle.sim){ const res = resultatCourse(salle); if (res){ salle.dernierResultat = res; diffuser(salle, res); chat.noterPartie(res); } }
   if (salle.boucle) clearInterval(salle.boucle);
   salle.boucle = null; salle.sim = null; salle.S = null; salle.premierA = 0;
+  // partie rapide : la course suivante, sur un autre circuit, après le temps de lire les résultats
+  if (salle.rapide){ salle.circuit = circuitAuHasard(salle.listeCircuits, salle.circuit); salle.departA = Date.now() + RAPIDE_ENTRE; }
   if (salles.has(salle.code)) majSalon(salle);
 }
 
