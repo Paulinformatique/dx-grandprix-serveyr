@@ -350,7 +350,8 @@ async function recevoir(c, d){
   if (d.t === "creer" || d.t === "rejoindre" || d.t === "rapide"){
     // il vient de se réveiller : préparer le jeu prend un moment, on prévient le joueur
     if (!moteur || moteur.version !== versionJeu || d.v !== versionJeu) envoyer(c, { t: "attente" });
-    try { await chargerJeu(); if (d.v !== versionJeu) await chargerJeu(true); await moteurAJour(); }
+    // relire le site seulement si le joueur a une version PLUS RÉCENTE que la nôtre (un ancien onglet ne doit pas faire recharger le serveur à chaque essai)
+    try { await chargerJeu(); if (+d.v > versionJeu && Date.now() - chargeA > 20000) await chargerJeu(true); await moteurAJour(); }
     catch (e){ envoyer(c, { t: "refus", raison: "Le serveur n'arrive pas à lire le jeu sur le site : " + e.message }); return; }
     if (d.v !== versionJeu){ envoyer(c, { t: "refus", raison: "Ta version du jeu n'est pas la même que celle du site : recharge la page (sur téléphone, ferme et rouvre l'onglet)." }); return; }
     quitter(c);
