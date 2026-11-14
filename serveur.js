@@ -176,7 +176,7 @@ const AJOUT = String.raw`
     const H = [];
     for (const v of jeu.voitures){
       if (zw === "arret" && v !== jeu.zw.elu) continue;              // figé
-      v.tempsTour += dt;
+      if (zw !== "arret") v.tempsTour += dt;          // ZA WARUDO : l'élu roule hors du temps, son tour ne compte pas ces secondes
       if (v.parti) continue;                         // parti ou éliminé : sa voiture ne bouge plus
       if (!v.humain){ majIA(v, dt); continue; }
       H.push(v);
