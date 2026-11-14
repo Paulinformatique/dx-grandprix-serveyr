@@ -131,7 +131,7 @@ const AJOUT = String.raw`
     for (const j of g) j.voiture = VOITURES[j.voiture] ? j.voiture | 0 : 0;
     jeu.multi = { grille: g, moi: p.id, maPlace: p.place, maCouleur: p.coul, monNom: p.nom, kaimaxus: !!kaimaxus, placeKai, maVoiture: p.voiture, mode: mode || "course", tours: tours | 0, voitures: voitures || "m3", gyro: !!gyro,
                  bots: bots || (kaimaxus ? [{ id: "kaimaxus", nom: "Kaimaxus", place: placeKai }] : []) };
-    jeu.modeMulti = mode || "course"; jeu.elimTour = 0; jeu.elimCompte = 0;
+    jeu.modeMulti = mode || "course"; jeu.elimTour = 0; jeu.elimCompte = 0; jeu.chatCompte = 0; jeu.finMode = false;
     jeu.adversaires = jeu.multi.bots.map(b => b.nom);
     jeu.partieCourse = 1; jeu.circuit = i; jeu.pauseMulti = false;
     reseau.hote = true;                       // Kaimaxus roule ici, comme une vraie voiture
@@ -148,6 +148,9 @@ const AJOUT = String.raw`
       if (v.idBot) v.idJ = v.idBot; else if (v.kaimaxus) v.idJ = "kaimaxus";
     }
     jeu.joueur = null;
+    // Chat et souris : un chat tiré au sort, qui part avec 10 s de retard
+    for (const v of jeu.voitures){ v.roiT = 0; v.chatM = false; v.chatAttente = false; v.chatOrdre = 0; v.dChatP = null; }
+    if (jeu.modeMulti === "chat"){ const vs = jeu.voitures.filter(v => !v.parti); const c = vs[Math.floor(Math.random() * vs.length)]; if (c){ devenirChatS(c); c.chatAttente = true; } }
     return { tours: toursC() };
   };
   // nombre de tours : celui du circuit, ou celui imposé (élimination : voitures − 1)
@@ -178,7 +181,7 @@ const AJOUT = String.raw`
       if (zw === "arret" && v !== jeu.zw.elu) continue;              // figé
       if (zw !== "arret") v.tempsTour += dt;          // ZA WARUDO : l'élu roule hors du temps, son tour ne compte pas ces secondes
       if (v.parti) continue;                         // parti ou éliminé : sa voiture ne bouge plus
-      if (!v.humain){ majIA(v, dt); continue; }
+      if (!v.humain){ if (v.chatAttente && jeu.chrono < 10){ v.v = 0; continue; } majIA(v, dt); continue; }
       H.push(v);
       if (v.parti) continue;                         // parti : sa voiture ne bouge plus (les autres la voient disparaître)
       if (v.enArrivee){ majIA(v, dt); continue; }
@@ -186,6 +189,7 @@ const AJOUT = String.raw`
       cmd.gaz = e.g ? 1 : 0; cmd.frein = e.f ? 1 : 0; cmd.dir = Math.max(-1, Math.min(1, +e.d || 0)); cmd.dirLisse = v.dirL || 0;
       // Gyro : un compteur d'appuis sur G (un message perdu ne fait pas rater l'appui)
       cmd.gyro = (e.y | 0) > (v.gyroVu | 0) ? 1 : 0; v.gyroVu = Math.max(v.gyroVu | 0, e.y | 0);
+      if (v.chatAttente && jeu.chrono < 10){ cmd.gaz = 0; cmd.frein = 1; }          // le chat attend 10 s
       if (e.e && v.horsPiste && !(v.retour > 0)) v.retour = 1.0;
       jeu.joueur = v; majJoueur(v, dt); v.dirL = cmd.dirLisse;
       if (v.tour >= toursC() && v.tempsFinal == null){ v.tempsFinal = jeu.chrono; arrivee(v); }
@@ -211,7 +215,33 @@ const AJOUT = String.raw`
     }
     collisions(dt);
     classer(); calculerAspiration(dt); noterPassages();
+    if (jeu.modeMulti === "chat") chatSouris(); else if (jeu.modeMulti === "roi") roiPiste(dt);
     if (jeu.modeMulti === "elimination") eliminer(toursC());
+  };
+  /* Chat et souris : le chat (110 % de sa vitesse) part 10 s après les autres. Chaque voiture
+     qu'il dépasse devient chat à son tour. Classement : les souris d'abord, puis les chats, du
+     dernier attrapé au premier (le chat de départ est dernier). La course s'arrête quand tout
+     le monde est chat (la dernière souris attrapée gagne), ou quand quelqu'un finit ses tours. */
+  function devenirChatS(v){ if (v.chatM) return; v.chatM = true; v.R = Object.assign({}, v.R, { vmax: v.R.vmax * 1.1, puissance: (v.R.puissance || 0) * 1.1 }); if (v.vmax) v.vmax *= 1.1; }
+  const finirModeS = ordre => { if (jeu.finMode) return; jeu.finMode = true; const t0 = jeu.chrono;
+    ordre.forEach((v, i) => { v.tempsFinal = t0 + 0.001 * (i + 1); v.classeFin = true; if (v.humain && !v.enArrivee) arrivee(v); }); };
+  const chatSouris = () => {
+    if (jeu.finMode) return;
+    const actifs = jeu.voitures.filter(v => !v.parti && !v.elimine);
+    for (const v of actifs) if (v.chatAttente && jeu.chrono >= 10) v.chatAttente = false;
+    for (const c of actifs){ if (!c.chatM || c.chatAttente) continue;
+      for (const m of actifs) if (!m.chatM && c.dChatP != null && m.dChatP != null && c.dChatP < m.dChatP && c.distance >= m.distance){ devenirChatS(m); m.chatOrdre = ++jeu.chatCompte; } }
+    for (const v of jeu.voitures) v.dChatP = v.distance;
+    const souris = actifs.filter(v => !v.chatM);
+    if ((souris.length === 0 && actifs.length > 1) || actifs.some(v => v.tempsFinal != null))
+      finirModeS([...souris.sort((a, b) => b.distance - a.distance), ...actifs.filter(v => v.chatM).sort((a, b) => b.chatOrdre - a.chatOrdre)]);
+  };
+  /* Roi de la piste : chaque seconde passée en tête rapporte 1 point ; à l'arrivée du premier, classement par points */
+  const roiPiste = dt => {
+    if (jeu.finMode) return;
+    const actifs = jeu.voitures.filter(v => !v.parti && !v.elimine), tete = actifs.filter(v => v.tempsFinal == null).sort((a, b) => b.distance - a.distance)[0];
+    if (tete) tete.roiT = (tete.roiT || 0) + dt;
+    if (actifs.some(v => v.tempsFinal != null)) finirModeS(actifs.sort((a, b) => (b.roiT || 0) - (a.roiT || 0) || b.distance - a.distance));
   };
   /* Mode élimination : la course fait (voitures − 1) tours. À chaque tour,
      quand l'avant-dernier passe la ligne, le dernier (celui qui n'a pas
@@ -253,7 +283,7 @@ const AJOUT = String.raw`
                                           r3(v.v), r3(v.lat), r3(v.distance), v.tour, v.meilleur == null ? null : r3(v.meilleur),
                                           v.tempsFinal == null ? null : r3(v.tempsFinal), v.horsPiste ? 1 : 0, v.retour > 0 ? 1 : 0,
                                           v.nPousse || 0, r3(v.deriveX), r3(v.deriveZ), v.elimine ? 1 : 0,
-                                          r3(v.gyroCharge), r3(v.gyroT)]);
+                                          r3(v.gyroCharge), r3(v.gyroT), v.chatM ? (v.chatAttente ? 2 : 1) : 0, r3(v.roiT)]);
   SRV.phase = () => jeu.phase;
   // Kujota : quand Hierophant Green a lancé ses émeraudes (chrono du serveur) et lesquelles sont cassées
   SRV.extraZ = () => typeof etatZaWarudoK === "function" ? etatZaWarudoK() : null;
@@ -295,7 +325,7 @@ function envoyer(c, msg){ if (c && c.ouvert) c.envoyer(JSON.stringify(msg)); }
 function diffuser(salle, msg){ const s = JSON.stringify(msg); for (const j of salle.joueurs) if (j.c.ouvert) j.c.envoyer(s);
   for (const c of salle.spectateurs || []) if (c.ouvert) c.envoyer(s); }
 /* ───── Modes du multijoueur ───── */
-const MODES = ["course", "championnat", "equipes", "elimination"];
+const MODES = ["course", "championnat", "equipes", "elimination", "chat", "roi"];
 const CHOIX_VOITURES = ["m3", "garage", "hasard"];
 const POINTS = [25, 18, 15, 12, 10, 8, 6, 4, 2, 1];
 const NB_VOITURES = 18;
