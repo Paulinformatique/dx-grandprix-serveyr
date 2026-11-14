@@ -151,6 +151,7 @@ const AJOUT = String.raw`
     // Chat et souris : un chat tiré au sort, qui part avec 10 s de retard
     for (const v of jeu.voitures){ v.roiT = 0; v.chatM = false; v.chatAttente = false; v.chatOrdre = 0; v.dChatP = null; }
     if (jeu.modeMulti === "chat"){ const vs = jeu.voitures.filter(v => !v.parti); const c = vs[Math.floor(Math.random() * vs.length)]; if (c){ devenirChatS(c); c.chatAttente = true; } }
+    if (jeu.modeMulti === "relais" || jeu.modeMulti === "duo") equipesModeS(g);
     return { tours: toursC() };
   };
   // nombre de tours : celui du circuit, ou celui imposé (élimination : voitures − 1)
@@ -181,6 +182,7 @@ const AJOUT = String.raw`
       if (zw === "arret" && v !== jeu.zw.elu) continue;              // figé
       if (zw !== "arret") v.tempsTour += dt;          // ZA WARUDO : l'élu roule hors du temps, son tour ne compte pas ces secondes
       if (v.parti) continue;                         // parti ou éliminé : sa voiture ne bouge plus
+      if (v.garee) continue;                         // relais (attend son tour) ou copilote d'un duo : sa voiture est rangée
       if (!v.humain){ if (v.chatAttente && jeu.chrono < 10){ v.v = 0; continue; } majIA(v, dt); continue; }
       H.push(v);
       if (v.parti) continue;                         // parti : sa voiture ne bouge plus (les autres la voient disparaître)
@@ -190,6 +192,7 @@ const AJOUT = String.raw`
       // Gyro : un compteur d'appuis sur G (un message perdu ne fait pas rater l'appui)
       cmd.gyro = (e.y | 0) > (v.gyroVu | 0) ? 1 : 0; v.gyroVu = Math.max(v.gyroVu | 0, e.y | 0);
       if (v.chatAttente && jeu.chrono < 10){ cmd.gaz = 0; cmd.frein = 1; }          // le chat attend 10 s
+      if (v.duoCo){ const e2 = E[v.duoCo] || {}; cmd.dir = Math.max(-1, Math.min(1, +e2.d || 0)); }     // duo : le volant est chez le copilote
       if (e.e && v.horsPiste && !(v.retour > 0)) v.retour = 1.0;
       jeu.joueur = v; majJoueur(v, dt); v.dirL = cmd.dirLisse;
       if (v.tour >= toursC() && v.tempsFinal == null){ v.tempsFinal = jeu.chrono; arrivee(v); }
@@ -215,7 +218,8 @@ const AJOUT = String.raw`
     }
     collisions(dt);
     classer(); calculerAspiration(dt); noterPassages();
-    if (jeu.modeMulti === "chat") chatSouris(); else if (jeu.modeMulti === "roi") roiPiste(dt);
+    if (jeu.modeMulti === "chat") chatSouris(); else if (jeu.modeMulti === "roi") roiPiste(dt); else if (jeu.modeMulti === "relais" || jeu.modeMulti === "duo") equipesFinS();
+    if (jeu.modeMulti === "relais") relaisPasserS();
     if (jeu.modeMulti === "elimination") eliminer(toursC());
   };
   /* Chat et souris : le chat (110 % de sa vitesse) part 10 s après les autres. Chaque voiture
@@ -235,6 +239,38 @@ const AJOUT = String.raw`
     const souris = actifs.filter(v => !v.chatM);
     if ((souris.length === 0 && actifs.length > 1) || actifs.some(v => v.tempsFinal != null))
       finirModeS([...souris.sort((a, b) => b.distance - a.distance), ...actifs.filter(v => v.chatM).sort((a, b) => b.chatOrdre - a.chatOrdre)]);
+  };
+  /* Relais et course en duo : on regroupe par équipe (la couleur choisie dans le salon).
+     Relais : un seul membre de l'équipe roule à la fois ; à chaque tour bouclé, la voiture
+     « passe le relais » au suivant, qui repart exactement de là (position, vitesse, tours).
+     Duo : deux joueurs d'une équipe se partagent une voiture : le premier accélère et freine,
+     le second tient le volant ; la voiture du second est rangée. */
+  const garer = v => { v.garee = true; v.x = v.z = 1e6; v.v = 0; };
+  const equipesModeS = g => {
+    const eqDe = v => { const j = g.find(x => x.id === v.idJ) || (jeu.multi.bots || []).find(b => b.id === v.idJ); return j && j.equipe != null ? j.equipe : 0; };
+    const eq = {}; for (const v of jeu.voitures){ if (v.parti) continue; v.equipeM = eqDe(v); (eq[v.equipeM] = eq[v.equipeM] || []).push(v); v.garee = false; v.relaisEq = null; v.duoCo = null; v.duoPilote = false; v.duoCopilote = false; }
+    jeu.equipesM = Object.values(eq).map(m => m.sort((a, b) => (a.place ?? 0) - (b.place ?? 0)));
+    if (jeu.modeMulti === "relais") for (const m of jeu.equipesM){ const E2 = { membres: m, leg: 0 }; m.forEach((v, k) => { v.relaisEq = E2; if (k > 0) garer(v); }); }
+    if (jeu.modeMulti === "duo") for (const m of jeu.equipesM){ const hs = m.filter(v => v.humain);
+      for (let k = 0; k + 1 < hs.length; k += 2){ const P = hs[k], C = hs[k + 1]; P.duoCo = C.idJ; P.duoPilote = true; C.duoCopilote = true; C.duoDe = P; garer(C); } }
+  };
+  const CLES_RELAIS = ["x", "y", "z", "cap", "capVit", "capLisse", "v", "lat", "vlat", "tangage", "roulis", "distance", "tour", "horsPiste", "dirL", "ligneIdx", "trouble", "deriveX", "deriveZ", "deriveT"];
+  const relaisPasserS = () => {
+    if (jeu.finMode) return; const L = piste.longueur;
+    for (const m of jeu.equipesM || []){ if (m.length < 2) continue; const E2 = m[0].relaisEq; if (!E2) continue;
+      const a = m.find(v => !v.garee); if (!a || a.tempsFinal != null || a.parti) continue;
+      if (a.tour <= E2.leg || a.tour >= toursC()) continue;
+      E2.leg = a.tour; const b = m[E2.leg % m.length]; if (b === a || b.parti) continue;
+      for (const k of CLES_RELAIS) if (a[k] !== undefined) b[k] = a[k];
+      b.s = b.humain ? a.distance - a.tour * L : a.distance; b.capVit = b.cap; b.garee = false; b.tempsTour = 0;
+      if (b.humain) b.idx = a.humain && a.idx != null ? a.idx : Math.floor((((b.s % L) + L) % L) / L * piste.nb) % piste.nb;      // (pour que le passage de ligne ne compte pas un tour de trop)
+      garer(a); }
+  };
+  // fin : quand la voiture d'une équipe (ou d'un duo) arrive, toute l'équipe (ou le duo) a le même temps
+  const equipesFinS = () => {
+    for (const v of jeu.voitures){ if (v.tempsFinal == null || v.parti) continue;
+      if (v.relaisEq) for (const o of v.relaisEq.membres) if (o !== v && o.tempsFinal == null){ o.tempsFinal = v.tempsFinal + 0.0005; }
+      if (v.duoPilote){ const C = jeu.voitures.find(o => o.idJ === v.duoCo); if (C && C.tempsFinal == null) C.tempsFinal = v.tempsFinal + 0.0005; } }
   };
   /* Roi de la piste : chaque seconde passée en tête rapporte 1 point ; à l'arrivée du premier, classement par points */
   const roiPiste = dt => {
@@ -283,7 +319,8 @@ const AJOUT = String.raw`
                                           r3(v.v), r3(v.lat), r3(v.distance), v.tour, v.meilleur == null ? null : r3(v.meilleur),
                                           v.tempsFinal == null ? null : r3(v.tempsFinal), v.horsPiste ? 1 : 0, v.retour > 0 ? 1 : 0,
                                           v.nPousse || 0, r3(v.deriveX), r3(v.deriveZ), v.elimine ? 1 : 0,
-                                          r3(v.gyroCharge), r3(v.gyroT), v.chatM ? (v.chatAttente ? 2 : 1) : 0, r3(v.roiT)]);
+                                          r3(v.gyroCharge), r3(v.gyroT), v.chatM ? (v.chatAttente ? 2 : 1) : 0, r3(v.roiT),
+                                          v.duoPilote ? 3 : v.duoCopilote ? 4 : v.garee ? 1 : 0]);
   SRV.phase = () => jeu.phase;
   // Kujota : quand Hierophant Green a lancé ses émeraudes (chrono du serveur) et lesquelles sont cassées
   SRV.extraZ = () => typeof etatZaWarudoK === "function" ? etatZaWarudoK() : null;
@@ -325,7 +362,8 @@ function envoyer(c, msg){ if (c && c.ouvert) c.envoyer(JSON.stringify(msg)); }
 function diffuser(salle, msg){ const s = JSON.stringify(msg); for (const j of salle.joueurs) if (j.c.ouvert) j.c.envoyer(s);
   for (const c of salle.spectateurs || []) if (c.ouvert) c.envoyer(s); }
 /* ───── Modes du multijoueur ───── */
-const MODES = ["course", "championnat", "equipes", "elimination", "chat", "roi"];
+const MODES = ["course", "championnat", "equipes", "elimination", "chat", "roi", "relais", "duo"];
+const MODES_EQUIPES = ["equipes", "relais", "duo"];
 const CHOIX_VOITURES = ["m3", "garage", "hasard"];
 const POINTS = [25, 18, 15, 12, 10, 8, 6, 4, 2, 1];
 const NB_VOITURES = 18;
@@ -507,8 +545,9 @@ function lancerCourse(salle){
     salle.circuit = salle.champ.courses[salle.champ.n];
   }
   const voitureDe = j => salle.voitures === "garage" ? j.voiture : salle.voitures === "hasard" ? Math.floor(Math.random() * NB_VOITURES) : 0;
-  const grille = salle.joueurs.map((j, k) => ({ id: j.id, nom: j.nom, coul: salle.mode === "equipes" ? j.equipe : j.coul, place: places[k],
-                                                voiture: voitureDe(j), equipe: salle.mode === "equipes" ? j.equipe : null }));
+  const enEq = MODES_EQUIPES.includes(salle.mode);
+  const grille = salle.joueurs.map((j, k) => ({ id: j.id, nom: j.nom, coul: enEq ? j.equipe : j.coul, place: places[k],
+                                                voiture: voitureDe(j), equipe: enEq ? j.equipe : null }));
   salle.grille = grille;
   const bots = nomsBots.map((nom, k) => ({ id: nom === "Kaimaxus" ? "kaimaxus" : "bot:" + nom, nom, place: places[salle.joueurs.length + k],
     equipe: nom === "Kaimaxus" ? (salle.equipeKai | 0) : ((salle.equipesBots || {})[nom] ?? salle.moteur.sim.equipeBot(nom)) }));
