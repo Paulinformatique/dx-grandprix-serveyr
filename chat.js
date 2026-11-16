@@ -144,6 +144,12 @@ async function charger(){
       journal("fichier :", comptes.size, "comptes");
     } else journal(supa ? "" : "pas de Supabase configuré : les messages seront perdus au redémarrage");
   } catch (e){ journal("chargement impossible :", e.message); }
+  /* Kujota 2 : les temps faits avant la correction de la dune étaient trop rapides : +10 s, une fois
+     (le temps corrigé reçoit la date du jour, donc il n'est pas corrigé deux fois). */
+  try { const corr = [];
+    for (const x of records.values()) if (x.course === "Kujota 2" && x.t < 1794853967630){ x.tf += 10; x.t = Date.now(); corr.push(x); }
+    if (corr.length){ ecrire({ f: "upsert", t: "dx_records", conflit: "joueur,course,voiture", l: corr }); journal("Kujota 2 : +10 s sur", corr.length, "temps"); }
+  } catch (e){ journal("correction Kujota 2 :", e.message); }
   pret = true;
 }
 const chargement = charger();
@@ -306,7 +312,9 @@ function statsPropres(s){
   return { courses: n(s.courses), coursesTotal: n(s.coursesTotal), p2: s.p2 == null ? null : n(s.p2),
            voitures: n(s.voitures), voituresTotal: n(s.voituresTotal), voiture: t(s.voiture),
            liste: Array.isArray(s.liste) ? s.liste.slice(0, 60).map(t) : [],
-           jouees: n(s.jouees), podiums: n(s.podiums), victoires: n(s.victoires), maj: Date.now() };
+           jouees: n(s.jouees), podiums: n(s.podiums), victoires: n(s.victoires),
+           argent: Number.isFinite(+s.argent) ? Math.max(0, Math.min(1e13, Math.round(+s.argent))) : 0,
+           defis: Array.isArray(s.defis) ? s.defis.slice(0, 40).map(t).filter(x => /^[a-z0-9-]{2,30}$/.test(x)) : [], maj: Date.now() };
 }
 
 /* ───────────── Messages reçus ───────────── */
@@ -449,6 +457,21 @@ async function recevoir(c, d, ctx){
     }
     const cl = classementMondial(course, voiture), rang = cl.findIndex(x => x.joueur === p) + 1;
     envoyer(c, { t: "c-rang", course, voiture, rang, total: cl.length, tf: records.get(k).tf, nouveau: !avant || tf < avant.tf });
+    return;
+  }
+  // Post-Game : combien de joueurs ont fait chaque défi
+  if (d.t === "c-defis"){
+    const n = {}; let total = 0;
+    for (const x of comptes.values()){ const st = x.stats; if (!st) continue; total++; for (const id of st.defis || []) n[id] = (n[id] || 0) + 1; }
+    envoyer(c, { t: "c-defis", n, total });
+    return;
+  }
+  // les plus riches : les berries en banque de chacun (envoyées avec les stats)
+  if (d.t === "c-classement" && d.course === "💰 Berries"){
+    const cl = [...comptes.values()].filter(x => x.stats && x.stats.argent > 0).sort((a, b) => b.stats.argent - a.stats.argent);
+    const rang = cl.findIndex(x => x.id === p);
+    const ligne = (x, i) => ({ rang: i + 1, id: x.id, nom: nomDe(x.id), voiture: -1, tf: x.stats.argent, tour: null, ami: rel(p, x.id) === "ami" });
+    envoyer(c, { t: "c-classement", course: d.course, voiture: d.voiture == null || d.voiture === "" || +d.voiture < 0 ? -1 : +d.voiture | 0, total: cl.length, top: cl.slice(0, 50).map(ligne), moi: rang >= 0 ? ligne(cl[rang], rang) : null });
     return;
   }
   if (d.t === "c-classement"){
