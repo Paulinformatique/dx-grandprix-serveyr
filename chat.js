@@ -225,6 +225,8 @@ const EFFACES = ["80437751"];
 const exDe = new Map();          // nouvel ID → ID supprimé (pour lui envoyer sa correction)
 async function effacerComptes(){
   await chargement;
+  // un compte qui porterait le mot de passe comme nom : renommé tout de suite
+  for (const x of [...comptes.values()]) if (estMotDePasse(x.nom)){ renommer(x.id, x.nom); journal("nom masqué", x.id); }
   for (const id of EFFACES){
     if (comptes.has(id)){ comptes.delete(id); ecrire({ f: "suppr", t: "dx_comptes", ou: { id } }); journal("compte supprimé", id); }
     for (const k of [...relations.keys()]){ const [a, b] = k.split("|"); if (a === id || b === id){ relations.delete(k); ecrire({ f: "suppr", t: "dx_relations", ou: { de: a, vers: b } }); } }
@@ -235,7 +237,13 @@ async function effacerComptes(){
 effacerComptes();
 // l'administrateur : le compte « trapezoidululu » le plus ancien (personne d'autre ne peut prendre ce nom)
 const estNomAdmin = n => String(n || "").trim().toLowerCase() === "trapezoidululu";
+// le compte de l'administrateur (fixe : un changement de nom ne lui fait plus perdre la main)
+const ID_ADMIN = "35175740";
+// le mot de passe de l'administrateur ne doit jamais servir de nom visible (même empreinte que dans le jeu)
+const empreinteJeu = t => { let h = 0x811c9dc5; for (let i = 0; i < t.length; i++){ h ^= t.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; } return h.toString(16).padStart(8, "0"); };
+const estMotDePasse = n => empreinteJeu(String(n || "").trim().toLowerCase()) === "40f0f59a";
 function idAdmin(){
+  if (comptes.has(ID_ADMIN)) return ID_ADMIN;
   let a = null; for (const x of comptes.values()) if (estNomAdmin(x.nom) && (!a || x.cree < a.cree)) a = x;
   return a ? a.id : null;
 }
@@ -349,6 +357,7 @@ function nomParDefaut(){
 }
 const ligneCompte = x => ({ id: x.id, nom: x.nom, hash: x.hash, cree: x.cree });
 function renommer(id, nom){
+  if (estMotDePasse(nom)) nom = id === idAdmin() ? "Trapezoidululu" : nomParDefaut();
   const x = comptes.get(id); if (!x || !nom || x.nom === nom) return;
   x.nom = nom; ecrire({ f: "upsert", t: "dx_comptes", conflit: "id", l: [ligneCompte(x)] });
   majEtat(id); for (const a of amis(id)) majEtat(a);
@@ -376,7 +385,7 @@ async function recevoir(c, d, ctx){
       const recree = d.nouveau === "auto" && /^\d{8}$/.test(idDemande);
       if (d.nouveau !== true && !recree) return refus(c, "Aucun compte avec cet ID.");
       const efface = recree && EFFACES.includes(idDemande);
-      compte = { id: recree && !efface ? idDemande : nouvelIdJoueur(), nom: (estNomAdmin(nom) && idAdmin()) ? nomParDefaut() : nom || nomParDefaut(), hash, cree: Date.now() };
+      compte = { id: recree && !efface ? idDemande : nouvelIdJoueur(), nom: (estNomAdmin(nom) && idAdmin()) || estMotDePasse(nom) ? nomParDefaut() : nom || nomParDefaut(), hash, cree: Date.now() };
       comptes.set(compte.id, compte);
       ecrire({ f: "upsert", t: "dx_comptes", conflit: "id", l: [ligneCompte(compte)] });
       if (efface) exDe.set(compte.id, idDemande);
