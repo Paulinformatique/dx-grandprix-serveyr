@@ -214,6 +214,25 @@ function inconvenant(t){
   return PIRES.some(m => tasse.includes(m) || serre.includes(m.replace(/(.)\1+/g, "$1")))
     || /nigg/.test(tasse) || /niga(?!ud)/.test(serre) || /(?<!monte)negro(?!ni)/.test(serre);
 }
+// les corrections à appliquer à un compte (le jeu les applique une seule fois chacune, à la connexion)
+//   retirer : le garage revient à la BMW M3 et le mode « tout débloquer » s'éteint ; argent : prime ; msg : message affiché une fois
+const SANCTIONS = {
+  "80437751": [{ id: "efface-1", effacer: true,
+    msg: "Ton compte a été supprimé par l'administrateur du jeu, après une deuxième triche (le mode « tout débloquer » est réservé à l'administrateur).\n\nTa progression repart de zéro, avec un nouvel ID." }]
+};
+// les comptes supprimés : effacés au démarrage (compte, amis, records) ; s'ils reviennent, c'est avec un nouvel ID
+const EFFACES = ["80437751"];
+const exDe = new Map();          // nouvel ID → ID supprimé (pour lui envoyer sa correction)
+async function effacerComptes(){
+  await chargement;
+  for (const id of EFFACES){
+    if (comptes.has(id)){ comptes.delete(id); ecrire({ f: "suppr", t: "dx_comptes", ou: { id } }); journal("compte supprimé", id); }
+    for (const k of [...relations.keys()]){ const [a, b] = k.split("|"); if (a === id || b === id){ relations.delete(k); ecrire({ f: "suppr", t: "dx_relations", ou: { de: a, vers: b } }); } }
+    let n = 0; for (const [k, x] of [...records]) if (x.joueur === id){ records.delete(k); n++; }
+    if (n){ ecrire({ f: "suppr", t: "dx_records", ou: { joueur: id } }); journal("records supprimés", id, n); }
+  }
+}
+effacerComptes();
 // l'administrateur : le compte « trapezoidululu » le plus ancien (personne d'autre ne peut prendre ce nom)
 const estNomAdmin = n => String(n || "").trim().toLowerCase() === "trapezoidululu";
 function idAdmin(){
@@ -287,7 +306,7 @@ function etatDe(p){
     if (k.startsWith("g:")){ const g = groupes.get(k.slice(2)); if (g && g.membres.includes(p)) derniers[k] = der; }
     else { const [a, b] = k.slice(2).split("|"); if (a === p || b === p) derniers["p:" + (a === p ? b : a)] = der; }
   }
-  return { t: "c-etat", id: p, nom: nomDe(p), amis: amisL, demandes, envoyees, bloques, groupes: gr, nonLus: nonLus(p), derniers };
+  return { t: "c-etat", id: p, nom: nomDe(p), amis: amisL, demandes, envoyees, bloques, groupes: gr, nonLus: nonLus(p), derniers, admin: p === idAdmin(), sanctions: SANCTIONS[p] || SANCTIONS[exDe.get(p)] || [] };
 }
 const majEtat = p => { if (enLigne.has(p)) aTous(p, etatDe(p)); };
 function presence(p, enL){
@@ -356,9 +375,11 @@ async function recevoir(c, d, ctx){
       // nouveau compte ; ou bien (« auto ») l'appareil avait ce compte mais le serveur l'a perdu : on le recrée avec le même ID
       const recree = d.nouveau === "auto" && /^\d{8}$/.test(idDemande);
       if (d.nouveau !== true && !recree) return refus(c, "Aucun compte avec cet ID.");
-      compte = { id: recree ? idDemande : nouvelIdJoueur(), nom: (estNomAdmin(nom) && idAdmin()) ? nomParDefaut() : nom || nomParDefaut(), hash, cree: Date.now() };
+      const efface = recree && EFFACES.includes(idDemande);
+      compte = { id: recree && !efface ? idDemande : nouvelIdJoueur(), nom: (estNomAdmin(nom) && idAdmin()) ? nomParDefaut() : nom || nomParDefaut(), hash, cree: Date.now() };
       comptes.set(compte.id, compte);
       ecrire({ f: "upsert", t: "dx_comptes", conflit: "id", l: [ligneCompte(compte)] });
+      if (efface) exDe.set(compte.id, idDemande);
       journal("nouveau compte", compte.id, compte.nom);
     } else if (compte.hash !== hash){
       return refus(c, "Mauvais code secret pour cet ID.");
@@ -489,7 +510,10 @@ async function recevoir(c, d, ctx){
     const x = comptes.get(q), ami = rel(p, q) === "ami" || adm;
     envoyer(c, { t: "c-profil", id: q, nom: x.nom, stats: x.stats || null, cree: x.cree, ami, moi: q === p,
                  demande: rel(p, q) === "demande", enLigne: ami || q === p ? enLigne.has(q) : null, vu: ami ? dernierVu.get(q) || null : null,
-                 enCourse: ami && enLigne.has(q) ? enCourseDe(q) : null });
+                 enCourse: ami && enLigne.has(q) ? enCourseDe(q) : null,
+                 // l'administrateur voit aussi avec qui ce joueur est ami
+                 amisAdmin: adm ? [...relations.entries()].filter(([k, e]) => e === "ami" && k.startsWith(q + "|")).map(([k]) => k.slice(q.length + 1))
+                   .filter(i => comptes.has(i)).map(i => ({ id: i, nom: nomDe(i), enLigne: enLigne.has(i) })).sort((a, b) => a.nom.localeCompare(b.nom)) : undefined });
     return;
   }
   if (d.t === "c-ami-demander"){
