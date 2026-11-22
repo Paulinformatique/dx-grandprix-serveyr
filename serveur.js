@@ -431,6 +431,10 @@ async function recevoir(c, d){
     try { await chargerJeu(); if (+d.v > versionJeu && Date.now() - chargeA > 20000) await chargerJeu(true); await moteurAJour(); }
     catch (e){ envoyer(c, { t: "refus", raison: "Le serveur n'arrive pas à lire le jeu sur le site : " + e.message }); return; }
     if (d.v !== versionJeu){ envoyer(c, { t: "refus", raison: "Ta version du jeu n'est pas la même que celle du site : recharge la page (sur téléphone, ferme et rouvre l'onglet)." }); return; }
+    // un compte = une seule partie à la fois (même ouvert sur plusieurs appareils ou onglets)
+    const cpt = d.cpt && chat.verifierCompte && chat.verifierCompte(d.cpt, d.cle) ? String(d.cpt) : null;
+    if (cpt) for (const x of salles.values()) if (x.joueurs.some(j => j.compte === cpt && j.c !== c && j.c.ouvert)){
+      envoyer(c, { t: "refus", raison: "Ton compte est déjà dans une partie sur un autre appareil (ou un autre onglet) : quitte-la d'abord." }); return; }
     quitter(c);
     const nom = String(d.nom || "Joueur").slice(0, 16);
     if (d.t === "creer"){
@@ -438,7 +442,7 @@ async function recevoir(c, d){
       const salle = { code, public: d.public !== false, joueurs: [], circuit: moteur.circuits[0], listeCircuits: moteur.circuits, moteur, kaimaxus: true, equipeKai: 1, remplir: false, equipesBots: {}, sim: null, S: null, boucle: null, entrees: {},
                       mode: "course", voitures: "m3", champ: null, paquet: [] };
       salles.set(code, salle);
-      const j = { id: nid(), nom, coul: 0, c, equipe: 0, voiture: 0 };
+      const j = { id: nid(), nom, coul: 0, c, equipe: 0, voiture: 0, compte: cpt };
       salle.joueurs.push(j); c.salle = salle; c.id = j.id;
       envoyer(c, { t: "bienvenue", id: j.id, code, hote: true });
       majSalon(salle);
@@ -452,7 +456,7 @@ async function recevoir(c, d){
     if (salle.joueurs.length >= MAX_JOUEURS){ envoyer(c, { t: "refus", raison: "Le groupe est plein (12 joueurs maximum)." }); return; }
     if (salle.sim || salle.attenteQ){ envoyer(c, { t: "refus", raison: "Une course est en cours : réessaie dans un moment." }); return; }
     const prises = new Set(salle.joueurs.map(x => x.coul)); let coul = 0; while (prises.has(coul)) coul++;
-    const j = { id: nid(), nom, coul: coul % COULEURS, c, equipe: salle.joueurs.length % 2, voiture: 0 };
+    const j = { id: nid(), nom, coul: coul % COULEURS, c, equipe: salle.joueurs.length % 2, voiture: 0, compte: cpt };
     salle.joueurs.push(j); c.salle = salle; c.id = j.id;
     envoyer(c, { t: "bienvenue", id: j.id, code: salle.code, hote: false });
     majSalon(salle);
@@ -712,7 +716,7 @@ serveur.on("upgrade", (req, sock) => {
   const accept = crypto.createHash("sha1").update(cle + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest("base64");
   sock.write("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " + accept + "\r\n\r\n");
   sock.setNoDelay(true);
-  const c = { ouvert: true, salle: null, id: null, vu: Date.now(),
+  const c = { ouvert: true, salle: null, id: null, vu: Date.now(), ip: String(req.headers["x-forwarded-for"] || sock.remoteAddress || "").split(",")[0].trim(),
     envoyer(t){ if (this.ouvert) try { sock.write(trame(t)); } catch (e) {} },
     // connexion qui n'avale plus (4G faible) : on saute des états plutôt que de les empiler (sinon ils arrivent avec des secondes de retard)
     engorge(){ return sock.writableLength > 6000; }, fermerSock(){ sock.destroy(); } };

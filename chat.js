@@ -31,6 +31,14 @@ const lus = new Map();         // "pseudo|conv vue par lui" → dernier id lu
 const votes = new Map();       // Community Vote : "idVote|joueur" → numéro de l'option choisie
 const records = new Map();     // "joueur|course|voiture" → { joueur, course, voiture, tf, tour, t } : le classement mondial
 let pret = false, compteurId = 0;
+/* Comptes DX (pseudo + mot de passe) et sauvegarde en ligne : table dx_sauvegardes.
+   Le mot de passe n'est jamais gardé : seulement son empreinte scrypt (avec un sel).
+   Chaque appareil connecté au compte a sa propre clé (« cles » : leurs empreintes). */
+const idents = new Map();      // ID du joueur → { id, login, bas, mdp, cles: [empreintes], maj, smaj }
+const parLogin = new Map();    // pseudo en minuscules → ID
+const savesFichier = new Map();// (sans Supabase) ID → sauvegarde
+const derniereSave = new Map();// ID → dernière sauvegarde connue (devient « save_prec » à la suivante : on peut toujours revenir d'un cran)
+let comptesDX = false;         // la table existe (sinon : pas de pop-up, on fait comme avant)
 
 // ID du joueur : 8 chiffres au hasard (le premier n'est jamais 0)
 function nouvelIdJoueur(){
@@ -93,7 +101,8 @@ function sauverFichier(){
   clearTimeout(minuteurFichier);
   minuteurFichier = setTimeout(() => {
     const o = { comptes: [...comptes.values()], relations: [...relations], groupes: [...groupes.values()],
-                messages: [...convs.values()].flat().concat(idees, parties, votesMsgs), lus: [...lus], records: [...records] };
+                messages: [...convs.values()].flat().concat(idees, parties, votesMsgs), lus: [...lus], records: [...records],
+                idents: [...idents.values()], saves: [...savesFichier] };
     try { fs.writeFileSync(FICHIER, JSON.stringify(o)); } catch (e) { journal("écriture impossible", e.message); }
   }, 1000);
 }
@@ -133,6 +142,7 @@ async function charger(){
       for (const x of m) rangerMessage(Object.assign({ id: +x.id, de: x.de, vers: x.vers, texte: x.texte, t: +x.t }, x.img ? { img: x.img } : {}));
       for (const x of l) lus.set(x.joueur + "|" + x.conv, +x.dernier);
       journal("Supabase :", comptes.size, "comptes,", m.length, "messages");
+      await chargerIdents();
     } else if (fs.existsSync(FICHIER)){
       const o = JSON.parse(fs.readFileSync(FICHIER, "utf8"));
       for (const x of o.comptes || []) if (x.id && x.nom) comptes.set(x.id, x);
@@ -141,8 +151,11 @@ async function charger(){
       for (const x of o.messages || []) rangerMessage(x);
       for (const [k, v] of o.lus || []) lus.set(k, v);
       for (const [k, v] of o.records || []) records.set(k, v);
-      journal("fichier :", comptes.size, "comptes");
+      for (const x of o.idents || []) rangerIdent(x);
+      for (const [k, v] of o.saves || []) savesFichier.set(k, v);
+      journal("fichier :", comptes.size, "comptes,", idents.size, "comptes DX");
     } else journal(supa ? "" : "pas de Supabase configuré : les messages seront perdus au redémarrage");
+    if (!supa) comptesDX = true;
   } catch (e){ journal("chargement impossible :", e.message); }
   /* Kujota 2 : les temps faits avant la correction de la dune étaient trop rapides : +10 s, une fois
      (le temps corrigé reçoit la date du jour, donc il n'est pas corrigé deux fois). */
@@ -153,6 +166,64 @@ async function charger(){
   pret = true;
 }
 const chargement = charger();
+
+/* ───────────── Comptes DX : pseudo + mot de passe, sauvegarde en ligne ───────────── */
+function rangerIdent(x){
+  const o = { id: String(x.id), login: String(x.login || ""), bas: String(x.login_bas || x.bas || "").toLowerCase(), mdp: String(x.mdp || ""),
+              cles: Array.isArray(x.cles) ? x.cles.map(String).slice(-8) : [], maj: +x.maj || 0, smaj: +x.smaj || 0 };
+  if (!o.bas || !o.mdp) return;
+  idents.set(o.id, o); parLogin.set(o.bas, o.id);
+}
+async function chargerIdents(){
+  try {
+    const l = [];
+    for (let off = 0; ; off += 500){
+      const r = await fetch(`${SUPA_URL}/rest/v1/dx_sauvegardes?select=id,login,login_bas,mdp,cles,maj,smaj&limit=500&offset=${off}`, { headers: entetes() });
+      if (!r.ok) throw new Error(r.status + " " + (await r.text()).slice(0, 120));
+      const x = await r.json(); l.push(...x); if (x.length < 500) break;
+    }
+    for (const x of l) rangerIdent(x);
+    if (!comptesDX) journal("comptes DX :", idents.size, "comptes avec pseudo + mot de passe");
+    comptesDX = true;
+  } catch (e){ if (comptesDX !== null) journal("pas de table dx_sauvegardes (comptes DX en attente) :", e.message.slice(0, 100)); comptesDX = false;
+    setTimeout(() => { comptesDX = null; chargerIdents().then(() => { if (comptesDX) for (const p of enLigne.keys()) majEtat(p); }); }, 60000); }
+}
+const ligneIdent = o => ({ id: o.id, login: o.login, login_bas: o.bas, mdp: o.mdp, cles: o.cles, maj: o.maj, smaj: o.smaj });
+function sauverIdent(o, save, prec){
+  const l = ligneIdent(o); if (save != null){ l.save = save; if (prec) l.save_prec = prec; derniereSave.set(o.id, save); }
+  if (!supa){ if (save != null){ if (prec) savesFichier.set(o.id + "|prec", prec); savesFichier.set(o.id, save); } sauverFichier(); return; }
+  ecrire({ f: "upsert", t: "dx_sauvegardes", conflit: "id", l: [l] });
+}
+// le mot de passe : scrypt avec un sel, comparé en temps constant
+const hacherMdp = mdp => { const sel = crypto.randomBytes(16).toString("hex"); return "s1$" + sel + "$" + crypto.scryptSync(String(mdp), sel, 32).toString("hex"); };
+function bonMdp(mdp, stocke){
+  const [v, sel, h] = String(stocke || "").split("$"); if (v !== "s1" || !sel || !h) return false;
+  const a = crypto.scryptSync(String(mdp), sel, 32), b = Buffer.from(h, "hex");
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+const empreinteCle = cle => crypto.createHash("sha256").update("dxgp|" + cle).digest("hex");
+// un pseudo : 3 à 16 caractères (lettres, chiffres, espace, - _ .), convenable, pas « Joueur 12 », pas le mot de passe de l'admin
+function loginValide(n, p){
+  const t = String(n || "").replace(/\s+/g, " ").trim();
+  if (t.length < 3 || t.length > 16) return [null, "Ton pseudo doit faire entre 3 et 16 caractères."];
+  if (!/^[\p{L}\p{N} _.\-]+$/u.test(t)) return [null, "Ton pseudo ne peut contenir que des lettres, des chiffres, des espaces et - _ ."];
+  if (/^joueur\s*\d*$/i.test(t)) return [null, "Choisis un vrai pseudo (pas « Joueur … »)."];
+  if (estMotDePasse(t) || filtrer(t) !== t || inconvenant(t)) return [null, "Ce pseudo n'est pas accepté, choisis-en un autre."];
+  if (estNomAdmin(t) && p !== idAdmin()) return [null, "Ce pseudo est déjà pris."];
+  const autre = parLogin.get(t.toLowerCase()); if (autre && autre !== p) return [null, "Ce pseudo est déjà pris, choisis-en un autre."];
+  return [t, null];
+}
+// limites d'essais de connexion : par connexion et par pseudo (10 min)
+const essaisLogin = new Map();
+function tropDEssais(cle, max){ const now = Date.now(), l = (essaisLogin.get(cle) || []).filter(x => now - x < 600000); essaisLogin.set(cle, l); return l.length >= max; }
+const noterEssai = cle => { const l = essaisLogin.get(cle) || []; l.push(Date.now()); essaisLogin.set(cle, l); };
+setInterval(() => { const now = Date.now(); for (const [k, l] of essaisLogin) if (!l.some(x => now - x < 600000)) essaisLogin.delete(k); }, 600000);
+async function lireSave(id){
+  if (!supa) return savesFichier.get(id) || null;
+  const r = await fetch(`${SUPA_URL}/rest/v1/dx_sauvegardes?id=eq.${encodeURIComponent(id)}&select=save`, { headers: entetes() });
+  if (!r.ok) throw new Error(r.status); const l = await r.json(); return l[0] && l[0].save || null;
+}
+const etatCompteDX = p => { const o = idents.get(p); return { actif: comptesDX === true, lie: !!o, login: o ? o.login : null, smaj: o ? o.smaj : 0 }; };
 
 /* ───────────── Community Vote ─────────────
    Un vote à la fois, ouvert 48 h puis bloqué. Pour voter : avoir fini au
@@ -314,7 +385,7 @@ function etatDe(p){
     if (k.startsWith("g:")){ const g = groupes.get(k.slice(2)); if (g && g.membres.includes(p)) derniers[k] = der; }
     else { const [a, b] = k.slice(2).split("|"); if (a === p || b === p) derniers["p:" + (a === p ? b : a)] = der; }
   }
-  return { t: "c-etat", id: p, nom: nomDe(p), amis: amisL, demandes, envoyees, bloques, groupes: gr, nonLus: nonLus(p), derniers, admin: p === idAdmin(), sanctions: SANCTIONS[p] || SANCTIONS[exDe.get(p)] || [] };
+  return { t: "c-etat", id: p, nom: nomDe(p), amis: amisL, demandes, envoyees, bloques, groupes: gr, nonLus: nonLus(p), derniers, admin: p === idAdmin(), sanctions: SANCTIONS[p] || SANCTIONS[exDe.get(p)] || [], compteDX: etatCompteDX(p) };
 }
 const majEtat = p => { if (enLigne.has(p)) aTous(p, etatDe(p)); };
 function presence(p, enL){
@@ -390,7 +461,7 @@ async function recevoir(c, d, ctx){
       ecrire({ f: "upsert", t: "dx_comptes", conflit: "id", l: [ligneCompte(compte)] });
       if (efface) exDe.set(compte.id, idDemande);
       journal("nouveau compte", compte.id, compte.nom);
-    } else if (compte.hash !== hash){
+    } else if (compte.hash !== hash && !((idents.get(compte.id) || {}).cles || []).includes(hash)){
       return refus(c, "Mauvais code secret pour cet ID.");
     } else if (nom && nom !== compte.nom && !(estNomAdmin(nom) && idAdmin() && idAdmin() !== compte.id)) renommer(compte.id, nom);
     const p = compte.id;
@@ -403,6 +474,20 @@ async function recevoir(c, d, ctx){
     if (premier) presence(p, true);
     return;
   }
+  if (d.t === "c-login"){
+    const non = raison => envoyer(c, { t: "c-login-refus", raison });
+    if (comptesDX !== true) return non("Les comptes ne sont pas encore ouverts sur le serveur, réessaie dans un moment.");
+    const bas = String(d.login || "").replace(/\s+/g, " ").trim().toLowerCase(), mdp = String(d.mdp || "");
+    const kc = "c|" + (c.ip || "") + "|" + (c.idConn || (c.idConn = crypto.randomBytes(6).toString("hex"))), kl = "l|" + bas;
+    if (tropDEssais(kc, 8) || tropDEssais(kl, 10)) return non("Trop d'essais : attends quelques minutes avant de réessayer.");
+    const id = parLogin.get(bas), o = id && idents.get(id);
+    if (!o || !comptes.has(id) || !bonMdp(mdp, o.mdp)){ noterEssai(kc); noterEssai(kl); return non("Pseudo ou mot de passe incorrect."); }
+    // une clé pour cet appareil (les autres appareils gardent la leur)
+    const cle = crypto.randomBytes(18).toString("base64").replace(/[^a-zA-Z0-9]/g, "").slice(0, 24).padEnd(20, "x");
+    o.cles = [...(o.cles || []), empreinteCle(cle)].slice(-8); sauverIdent(o);
+    journal("connexion au compte", o.id, o.login);
+    return envoyer(c, { t: "c-login-ok", id: o.id, cle, login: o.login });
+  }
   const p = c.joueur; if (!p) return refus(c, "Pas connecté au chat.");
   // anti-spam : 6 actions par 4 secondes
   const now = Date.now();
@@ -411,6 +496,47 @@ async function recevoir(c, d, ctx){
     if (c.debit.length > 6) return refus(c, "Doucement ! Attends un peu avant d'envoyer d'autres messages.");
   }
 
+  if (d.t === "c-compte-creer"){
+    const non = raison => envoyer(c, { t: "c-compte-refus", raison });
+    if (comptesDX !== true) return non("Les comptes ne sont pas encore ouverts sur le serveur, réessaie dans un moment.");
+    if (idents.has(p)) return envoyer(c, { t: "c-compte-ok", login: idents.get(p).login });
+    const [login, err] = loginValide(d.login, p); if (err) return non(err);
+    const mdp = String(d.mdp || "");
+    if (mdp.length < 6 || mdp.length > 64) return non("Ton mot de passe doit faire entre 6 et 64 caractères.");
+    if (estMotDePasse(mdp) && p !== idAdmin()) return non("Choisis un autre mot de passe.");
+    const o = { id: p, login, bas: login.toLowerCase(), mdp: hacherMdp(mdp), cles: [], maj: Date.now(), smaj: 0 };
+    idents.set(p, o); parLogin.set(o.bas, p); sauverIdent(o);
+    if (!(p === idAdmin())) renommer(p, login);
+    journal("compte DX créé", p, login);
+    envoyer(c, { t: "c-compte-ok", login }); majEtat(p);
+    return;
+  }
+  if (d.t === "c-mdp"){
+    const o = idents.get(p), non = raison => envoyer(c, { t: "c-mdp-refus", raison });
+    if (!o) return non("Pas de compte.");
+    if (tropDEssais("m|" + p, 6)) return non("Trop d'essais : attends quelques minutes.");
+    if (!bonMdp(String(d.ancien || ""), o.mdp)){ noterEssai("m|" + p); return non("Ancien mot de passe incorrect."); }
+    const mdp = String(d.mdp || ""); if (mdp.length < 6 || mdp.length > 64) return non("Ton mot de passe doit faire entre 6 et 64 caractères.");
+    o.mdp = hacherMdp(mdp); sauverIdent(o); return envoyer(c, { t: "c-mdp-ok" });
+  }
+  // la sauvegarde en ligne : le jeu envoie la sienne (scellée) ; la plus récente gagne
+  if (d.t === "c-save"){
+    const o = idents.get(p); if (!o) return;
+    const s = typeof d.save === "string" ? d.save : ""; if (s.length < 20 || s.length > 600000) return;
+    let maj = 0; try { const x = JSON.parse(s); if (!x || typeof x !== "object" || !x.sceau || !Array.isArray(x.possedees)) return; maj = +x.maj || 0; } catch (e) { return; }
+    // un autre appareil a envoyé une sauvegarde depuis la dernière que celui-ci a vue : il doit d'abord la récupérer
+    if (d.force !== true && o.smaj && +d.base !== o.smaj) return envoyer(c, { t: "c-save-vieille", smaj: o.smaj });
+    let prec = derniereSave.get(p) || null;
+    if (!prec && o.smaj) try { prec = await lireSave(p); } catch (e) {}
+    if (prec === s) prec = null;
+    o.smaj = Math.max(maj, o.smaj + 1); o.maj = Date.now(); sauverIdent(o, s, prec);
+    return envoyer(c, { t: "c-save-ok", smaj: o.smaj });
+  }
+  if (d.t === "c-save-lire"){
+    const o = idents.get(p); if (!o) return;
+    try { const s = await lireSave(p); if (s) derniereSave.set(p, s); return envoyer(c, { t: "c-save-donnees", save: s, smaj: o.smaj }); }
+    catch (e){ journal("lecture de sauvegarde impossible", p, e.message); return envoyer(c, { t: "c-save-donnees", save: null, erreur: true }); }
+  }
   if (d.t === "c-vote-etat") return envoyer(c, etatVote(p));
   if (d.t === "c-voter"){
     const v = VOTES.find(x => x.id === d.id), choix = +d.choix;
@@ -453,7 +579,19 @@ async function recevoir(c, d, ctx){
     const tous = [...comptes.values()].map(x => { const st = x.stats || {}; return { id: x.id, nom: x.nom, cree: x.cree || null, vu: enLigne.has(x.id) ? Date.now() : dernierVu.get(x.id) || null, enLigne: enLigne.has(x.id),
       courses: st.courses == null ? null : st.courses, voitures: st.voitures == null ? null : st.voitures, jouees: st.jouees == null ? null : st.jouees, victoires: st.victoires == null ? null : st.victoires }; })
       .sort((a, b) => (b.vu || 0) - (a.vu || 0));
-    return envoyer(c, { t: "c-admin", enLigne: enL, comptes: comptes.size, groupes: groupesJeu, parties: pt, idees: id2, tous });
+    // les comptes DX (pseudo + mot de passe) : qui a enregistré son compte, et sa dernière sauvegarde en ligne (jamais les mots de passe : on ne les a pas)
+    const cdx = [...idents.values()].map(o => ({ id: o.id, login: o.login, nom: nomDe(o.id), smaj: o.smaj || null, appareils: (o.cles || []).length + 1, enLigne: enLigne.has(o.id) }))
+      .sort((a, b) => (b.smaj || 0) - (a.smaj || 0));
+    return envoyer(c, { t: "c-admin", enLigne: enL, comptes: comptes.size, groupes: groupesJeu, parties: pt, idees: id2, tous, comptesDX: cdx, comptesDXActifs: comptesDX === true });
+  }
+  // l'administrateur donne un mot de passe provisoire à un joueur qui a oublié le sien (affiché une seule fois)
+  if (d.t === "c-admin-mdp"){
+    if (p !== idAdmin()) return;
+    const o = idents.get(String(d.id || "")); if (!o) return envoyer(c, { t: "c-admin-mdp-ok", erreur: "Ce joueur n'a pas de compte." });
+    const mdp = Array.from(crypto.randomBytes(8), x => "abcdefghjkmnpqrstuvwxyz23456789"[x % 31]).join("");
+    o.mdp = hacherMdp(mdp); sauverIdent(o); essaisLogin.delete("l|" + o.bas);
+    journal("mot de passe provisoire donné à", o.id, o.login);
+    return envoyer(c, { t: "c-admin-mdp-ok", id: o.id, login: o.login, mdp });
   }
   if (d.t === "c-statut"){
     const code = String(d.code || "").toUpperCase(), idJeu = String(d.idJeu || "").slice(0, 20);
@@ -665,4 +803,9 @@ function noterPartie(res){
     ecrire({ f: "upsert", t: "dx_messages", conflit: "id", l: [{ id: m.id, de: m.de, vers: m.vers, texte: m.texte, t: m.t }] });
   } catch (e) { journal("partie non notée :", e.message); }
 }
-module.exports = { recevoir, sortir, filtrer, inconvenant, chargement, noterPartie, stats: () => ({ comptes: comptes.size, enLigne: enLigne.size, supabase: supa }) };
+// (le multijoueur) : cet ID + ce code sont-ils bien ceux d'un compte ? (code de l'appareil, ou clé d'un appareil connecté par mot de passe)
+function verifierCompte(id, cle){
+  const x = comptes.get(String(id || "")); if (!x || String(cle || "").length < 16) return false;
+  const h = empreinteCle(String(cle)); return x.hash === h || ((idents.get(x.id) || {}).cles || []).includes(h);
+}
+module.exports = { recevoir, verifierCompte, sortir, filtrer, inconvenant, chargement, noterPartie, stats: () => ({ comptes: comptes.size, enLigne: enLigne.size, supabase: supa }) };
