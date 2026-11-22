@@ -38,6 +38,7 @@ const idents = new Map();      // ID du joueur → { id, login, bas, mdp, cles: 
 const parLogin = new Map();    // pseudo en minuscules → ID
 const savesFichier = new Map();// (sans Supabase) ID → sauvegarde
 const derniereSave = new Map();// ID → dernière sauvegarde connue (devient « save_prec » à la suivante : on peut toujours revenir d'un cran)
+let erreurDX = "";
 let comptesDX = false;         // la table existe (sinon : pas de pop-up, on fait comme avant)
 
 // ID du joueur : 8 chiffres au hasard (le premier n'est jamais 0)
@@ -185,7 +186,7 @@ async function chargerIdents(){
     for (const x of l) rangerIdent(x);
     if (!comptesDX) journal("comptes DX :", idents.size, "comptes avec pseudo + mot de passe");
     comptesDX = true;
-  } catch (e){ if (comptesDX !== null) journal("pas de table dx_sauvegardes (comptes DX en attente) :", e.message.slice(0, 100)); comptesDX = false;
+  } catch (e){ erreurDX = e.message.slice(0, 160); if (comptesDX !== null) journal("pas de table dx_sauvegardes (comptes DX en attente) :", e.message.slice(0, 100)); comptesDX = false;
     setTimeout(() => { comptesDX = null; chargerIdents().then(() => { if (comptesDX) for (const p of enLigne.keys()) majEtat(p); }); }, 60000); }
 }
 const ligneIdent = o => ({ id: o.id, login: o.login, login_bas: o.bas, mdp: o.mdp, cles: o.cles, maj: o.maj, smaj: o.smaj });
@@ -808,4 +809,4 @@ function verifierCompte(id, cle){
   const x = comptes.get(String(id || "")); if (!x || String(cle || "").length < 16) return false;
   const h = empreinteCle(String(cle)); return x.hash === h || ((idents.get(x.id) || {}).cles || []).includes(h);
 }
-module.exports = { recevoir, verifierCompte, sortir, filtrer, inconvenant, chargement, noterPartie, stats: () => ({ comptes: comptes.size, enLigne: enLigne.size, supabase: supa }) };
+module.exports = { recevoir, verifierCompte, sortir, filtrer, inconvenant, chargement, noterPartie, stats: () => ({ comptes: comptes.size, enLigne: enLigne.size, supabase: supa, comptesDX: comptesDX === true ? "ouverts (" + idents.size + ")" : comptesDX === false ? "table introuvable : " + erreurDX : "vérification…" }) };
