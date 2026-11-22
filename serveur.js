@@ -658,7 +658,7 @@ function resultatCourse(salle){
   }
   return res;
 }
-/* Fin des qualifs : le classement (temps du tour chrono), puis la course 4 s plus tard,
+/* Fin des qualifs : le classement (temps du tour chrono), puis la course tout de suite,
    la grille dans cet ordre ; ceux qui n'ont pas bouclé leur tour en 3 min sont exclus. */
 function finQualif(salle){
   let cl = []; try { salle.sim.activer(salle.S); cl = salle.sim.qualifs(); } catch (e) {}
@@ -671,7 +671,7 @@ function finQualif(salle){
     if (salle.annuleQ){ salle.annuleQ = false; return; }           // l'hôte est revenu au groupe entre-temps
     if (!salles.has(salle.code) || !salle.joueurs.length || salle.sim) return;
     lancerCourse(salle, { ordre: cl.filter(x => x.t != null).map(x => x.id), exclus: cl.filter(x => x.t == null).map(x => x.id) });
-  }, 4000);
+  }, 300);          // la course enchaîne tout de suite
 }
 function finCourse(salle){
   if (salle.attenteQ){ salle.attenteQ = false; salle.annuleQ = true; if (salles.has(salle.code)) majSalon(salle); return; }
