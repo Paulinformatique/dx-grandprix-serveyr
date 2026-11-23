@@ -345,7 +345,9 @@ function annoncer(p, msg){
 }
 // comptes à qui on rend leur progression (une seule fois, côté jeu) : Neros (23 nov. 2026), il en était à la Part 2
 const RETROUVES = { "neros": { id: "retrouve-neros-1", part2: true, argentMin: 3000000 } };
-function retrouves(p){ const o = idents.get(p), r = o && RETROUVES[o.bas]; return r ? [Object.assign({ msg: MSG_RETROUVE }, r)] : []; }
+// (par le pseudo du compte, ou par le nom affiché : même sans compte ☁️, et quel que soit l'ID qui reste après une fusion)
+function retrouves(p){ const o = idents.get(p), n = String(nomDe(p) || "").trim().toLowerCase(), r = (o && RETROUVES[o.bas]) || RETROUVES[n];
+  return r ? [Object.assign({ msg: MSG_RETROUVE }, r)] : []; }
 function fusionner(q, p){
   const a = comptes.get(q), b = comptes.get(p); if (!a || !b || q === p || idents.has(q)) return false;
   // records
