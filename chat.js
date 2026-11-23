@@ -346,6 +346,15 @@ function annoncer(p, msg){
 // comptes à qui on rend leur progression (une seule fois, côté jeu) : Neros (23 nov. 2026), il en était à la Part 2
 const RETROUVES = { "neros": { id: "retrouve-neros-1", part2: true, argentMin: 3000000 } };
 // (par le pseudo du compte, ou par le nom affiché : même sans compte ☁️, et quel que soit l'ID qui reste après une fusion)
+// au démarrage : tous les ID « Neros » regroupés sur un seul (celui du compte ☁️, sinon celui qu'il utilise en dernier)
+(async () => { await chargement; await new Promise(r => setTimeout(r, 3000));
+  try { for (const nom of Object.keys(RETROUVES)){
+    const l = [...comptes.values()].filter(x => String(x.nom || "").trim().toLowerCase() === nom || (idents.get(x.id) || {}).bas === nom);
+    if (l.length < 2) continue;
+    const vu = x => enLigne.has(x.id) ? Date.now() : dernierVu.get(x.id) || x.cree || 0;
+    const cible = l.find(x => idents.has(x.id)) || [...l].sort((a, b) => vu(b) - vu(a))[0];
+    for (const x of l) if (x.id !== cible.id && !idents.has(x.id)) fusionner(x.id, cible.id);
+  } } catch (e){ journal("regroupement", e.message); } })();
 function retrouves(p){ const o = idents.get(p), n = String(nomDe(p) || "").trim().toLowerCase(), r = (o && RETROUVES[o.bas]) || RETROUVES[n];
   return r ? [Object.assign({ msg: MSG_RETROUVE }, r)] : []; }
 function fusionner(q, p){
