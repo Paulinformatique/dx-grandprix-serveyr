@@ -24,6 +24,7 @@ const journal = (...a) => console.log(new Date().toISOString().slice(11, 19), "[
 
 /* ───────────── Données ───────────── */
 const comptes = new Map();     // ID du joueur (8 chiffres) → { id, nom, hash, cree }
+const fusions = new Map();     // ancien ID fusionné → { vers: ID du compte, hash } (son appareil est redirigé vers le compte)
 const relations = new Map();   // "de|vers" (ID) → "demande" | "ami" | "bloque"
 const groupes = new Map();     // id → { id, nom, membres: [ID], cree }
 const convs = new Map();       // clé de conversation → [messages] (privée : "p:a|b" trié ; groupe : "g:id")
@@ -43,7 +44,7 @@ let comptesDX = false;         // la table existe (sinon : pas de pop-up, on fai
 
 // ID du joueur : 8 chiffres au hasard (le premier n'est jamais 0)
 function nouvelIdJoueur(){
-  let id; do id = String(10000000 + crypto.randomInt(90000000)); while (comptes.has(id));
+  let id; do id = String(10000000 + crypto.randomInt(90000000)); while (comptes.has(id) || fusions.has(id));
   return id;
 }
 const nomDe = id => (comptes.get(id) || {}).nom || "Joueur";
@@ -103,7 +104,7 @@ function sauverFichier(){
   minuteurFichier = setTimeout(() => {
     const o = { comptes: [...comptes.values()], relations: [...relations], groupes: [...groupes.values()],
                 messages: [...convs.values()].flat().concat(idees, parties, votesMsgs), lus: [...lus], records: [...records],
-                idents: [...idents.values()], saves: [...savesFichier] };
+                idents: [...idents.values()], saves: [...savesFichier], fusions: [...fusions] };
     try { fs.writeFileSync(FICHIER, JSON.stringify(o)); } catch (e) { journal("écriture impossible", e.message); }
   }, 1000);
 }
@@ -136,7 +137,7 @@ async function charger(){
       // le classement mondial (table ajoutée après : absente, on fait sans)
       try { for (const x of await lireTable("dx_records")) records.set(x.joueur + "|" + x.course + "|" + x.voiture, { joueur: x.joueur, course: x.course, voiture: +x.voiture, tf: +x.tf, tour: x.tour == null ? null : +x.tour, t: +x.t }); }
       catch (e){ journal("pas de table dx_records :", e.message.slice(0, 80)); }
-      for (const x of c) comptes.set(String(x.id), { id: String(x.id), nom: x.nom, hash: x.hash, cree: +x.cree, stats: x.stats || null, vu: x.vu == null ? null : +x.vu });
+      for (const x of c) if (x.stats && x.stats.fusion) fusions.set(String(x.id), { vers: String(x.stats.fusion), hash: x.hash }); else comptes.set(String(x.id), { id: String(x.id), nom: x.nom, hash: x.hash, cree: +x.cree, stats: x.stats || null, vu: x.vu == null ? null : +x.vu });
       for (const x of r) relations.set(x.de + "|" + x.vers, x.etat);
       for (const x of g) groupes.set(x.id, { id: x.id, nom: x.nom, membres: x.membres || [], cree: +x.cree });
       m.sort((a, b) => a.id - b.id);
@@ -147,6 +148,7 @@ async function charger(){
     } else if (fs.existsSync(FICHIER)){
       const o = JSON.parse(fs.readFileSync(FICHIER, "utf8"));
       for (const x of o.comptes || []) if (x.id && x.nom) comptes.set(x.id, x);
+      for (const [k, v] of o.fusions || []) fusions.set(k, v);
       for (const [k, v] of o.relations || []) relations.set(k, v);
       for (const x of o.groupes || []) groupes.set(x.id, x);
       for (const x of o.messages || []) rangerMessage(x);
@@ -328,6 +330,42 @@ async function effacerComptes(){
   }
 }
 effacerComptes();
+/* Deux ID pour le même joueur (il a créé son compte sur un appareil, puis s'est connecté depuis celui où il jouait) :
+   l'ancien est fusionné dans le compte : ses records (le meilleur temps garde), ses amis, ses groupes, ses stats ;
+   il disparaît des classements, et son appareil est redirigé vers le compte (sa progression y est ajoutée par le jeu). */
+function fusionner(q, p){
+  const a = comptes.get(q), b = comptes.get(p); if (!a || !b || q === p || idents.has(q)) return false;
+  // records
+  const maj = [];
+  for (const [k, x] of [...records]) if (x.joueur === q){
+    records.delete(k); const k2 = p + "|" + x.course + "|" + x.voiture, y = records.get(k2);
+    const z = !y ? Object.assign({}, x, { joueur: p }) : { joueur: p, course: x.course, voiture: x.voiture, tf: Math.min(x.tf, y.tf),
+      tour: x.tour == null ? y.tour : y.tour == null ? x.tour : Math.min(x.tour, y.tour), t: Math.max(x.t || 0, y.t || 0) };
+    records.set(k2, z); maj.push(z); }
+  ecrire({ f: "suppr", t: "dx_records", ou: { joueur: q } });
+  if (maj.length) ecrire({ f: "upsert", t: "dx_records", conflit: "joueur,course,voiture", l: maj });
+  // amis, demandes, blocages
+  const rang = e => e === "bloque" ? 3 : e === "ami" ? 2 : e === "demande" ? 1 : 0;
+  for (const [k, e] of [...relations]){ const [x, y] = k.split("|"); if (x !== q && y !== q) continue;
+    setRel(x, y, null); const x2 = x === q ? p : x, y2 = y === q ? p : y; if (x2 === y2) continue;
+    if (rang(e) > rang(relations.get(x2 + "|" + y2))) setRel(x2, y2, e); }
+  // groupes
+  for (const g of groupes.values()) if (g.membres.includes(q)){ g.membres = [...new Set(g.membres.map(m => m === q ? p : m))]; ecrire({ f: "upsert", t: "dx_groupes", conflit: "id", l: [g] }); }
+  // stats du profil : le meilleur des deux
+  if (a.stats){ const s = Object.assign({}, a.stats, b.stats || {});
+    for (const [k, v] of Object.entries(a.stats)) if (typeof v === "number" && v > (+(b.stats || {})[k] || 0)) s[k] = v;
+    b.stats = s; ecrire({ f: "maj", t: "dx_comptes", ou: { id: p }, l: { stats: s } }); }
+  if (a.cree && (!b.cree || a.cree < b.cree)){ b.cree = a.cree; ecrire({ f: "maj", t: "dx_comptes", ou: { id: p }, l: { cree: a.cree } }); }
+  // l'ancien ID : gardé seulement pour rediriger son appareil
+  comptes.delete(q); fusions.set(q, { vers: p, hash: a.hash });
+  ecrire({ f: "maj", t: "dx_comptes", ou: { id: q }, l: { stats: { fusion: p } } });
+  const o = idents.get(p); if (o && a.hash && !o.cles.includes(a.hash)){ o.cles = [...o.cles, a.hash].slice(-8); sauverIdent(o); }
+  // ses connexions ouvertes : redirigées
+  const sl = enLigne.get(q); if (sl){ enLigne.delete(q); let s2 = enLigne.get(p); if (!s2) enLigne.set(p, s2 = new Set()); for (const c of sl){ c.joueur = p; s2.add(c); } }
+  journal("fusion", q, a.nom, "→", p, b.nom, "·", maj.length, "records");
+  for (const x of [p, ...amis(p)]) majEtat(x);
+  return true;
+}
 // l'administrateur : le compte « trapezoidululu » le plus ancien (personne d'autre ne peut prendre ce nom)
 const estNomAdmin = n => String(n || "").trim().toLowerCase() === "trapezoidululu";
 // le compte de l'administrateur (fixe : un changement de nom ne lui fait plus perdre la main)
@@ -472,8 +510,12 @@ async function recevoir(c, d, ctx){
     const cle = String(d.cle || ""), idDemande = String(d.id || "").replace(/[#\s]/g, ""), nom = nomPropre(d.nom);
     if (cle.length < 16) return refus(c, "Code secret invalide.");
     const hash = crypto.createHash("sha256").update("dxgp|" + cle).digest("hex");
-    let compte = d.nouveau === true ? null : comptes.get(idDemande);
-    if (!compte){
+    let compte = d.nouveau === true ? null : comptes.get(idDemande), redirige = false;
+    const fu = d.nouveau !== true && fusions.get(idDemande);
+    if (fu){ if (fu.hash !== hash) return refus(c, "Mauvais code secret pour cet ID."); compte = comptes.get(fu.vers); redirige = true;
+      if (!compte) return refus(c, "Aucun compte avec cet ID."); }
+    if (redirige){}
+    else if (!compte){
       // nouveau compte ; ou bien (« auto ») l'appareil avait ce compte mais le serveur l'a perdu : on le recrée avec le même ID
       const recree = d.nouveau === "auto" && /^\d{8}$/.test(idDemande);
       if (d.nouveau !== true && !recree) return refus(c, "Aucun compte avec cet ID.");
@@ -507,6 +549,8 @@ async function recevoir(c, d, ctx){
     // une clé pour cet appareil (les autres appareils gardent la leur)
     const cle = crypto.randomBytes(18).toString("base64").replace(/[^a-zA-Z0-9]/g, "").slice(0, 24).padEnd(20, "x");
     o.cles = [...(o.cles || []), empreinteCle(cle)].slice(-8); sauverIdent(o);
+    // l'appareil avait son propre ID (avec ses records, ses amis) : fusionné dans le compte, pas de doublon au classement
+    const anc = d.ancien && String(d.ancien.id || ""); if (anc && anc !== o.id && verifierCompte(anc, d.ancien.cle) && !idents.has(anc)) try { fusionner(anc, o.id); } catch (e) { journal("fusion impossible", e.message); }
     journal("connexion au compte", o.id, o.login);
     return envoyer(c, { t: "c-login-ok", id: o.id, cle, login: o.login });
   }
@@ -604,9 +648,20 @@ async function recevoir(c, d, ctx){
       courses: st.courses == null ? null : st.courses, voitures: st.voitures == null ? null : st.voitures, jouees: st.jouees == null ? null : st.jouees, victoires: st.victoires == null ? null : st.victoires }; })
       .sort((a, b) => (b.vu || 0) - (a.vu || 0));
     // les comptes DX (pseudo + mot de passe) : qui a enregistré son compte, et sa dernière sauvegarde en ligne (jamais les mots de passe : on ne les a pas)
-    const cdx = [...idents.values()].map(o => ({ id: o.id, login: o.login, nom: nomDe(o.id), smaj: o.smaj || null, appareils: (o.cles || []).length + 1, enLigne: enLigne.has(o.id) }))
+    const parNom = new Map(); for (const x of comptes.values()){ const k = String(x.nom || "").trim().toLowerCase(); if (!parNom.has(k)) parNom.set(k, []); parNom.get(k).push(x); }
+    const doublons = o => { const v = new Set(); for (const k of [String(nomDe(o.id)).trim().toLowerCase(), o.bas]) for (const x of parNom.get(k) || []) if (x.id !== o.id && !idents.has(x.id)) v.add(x.id);
+      return [...v].map(id => { const x = comptes.get(id), st = x.stats || {}; return { id, nom: x.nom, vu: enLigne.has(id) ? Date.now() : dernierVu.get(id) || null, courses: st.courses == null ? null : st.courses, voitures: st.voitures == null ? null : st.voitures,
+        records: [...records.values()].filter(r => r.joueur === id).length }; }); };
+    const cdx = [...idents.values()].map(o => ({ id: o.id, login: o.login, nom: nomDe(o.id), smaj: o.smaj || null, appareils: (o.cles || []).length + 1, enLigne: enLigne.has(o.id), doublons: doublons(o) }))
       .sort((a, b) => (b.smaj || 0) - (a.smaj || 0));
     return envoyer(c, { t: "c-admin", enLigne: enL, comptes: comptes.size, groupes: groupesJeu, parties: pt, idees: id2, tous, comptesDX: cdx, comptesDXActifs: comptesDX === true });
+  }
+  // l'administrateur fusionne un ancien ID (doublon) dans un compte
+  if (d.t === "c-admin-fusion"){
+    if (p !== idAdmin()) return;
+    const q = String(d.ancien || ""), vers = String(d.id || "");
+    const ok = idents.has(vers) && fusionner(q, vers);
+    return envoyer(c, { t: "c-admin-mdp-ok", fusion: true, id: vers, login: (idents.get(vers) || {}).login, erreur: ok ? null : "Fusion impossible (ID introuvable, ou c'est lui-même un compte)." });
   }
   // l'administrateur regarde les sauvegardes en ligne d'un compte (l'actuelle et l'historique) et peut en remettre une
   if (d.t === "c-admin-saves" || d.t === "c-admin-restaurer"){
