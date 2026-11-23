@@ -103,14 +103,15 @@ function sauverFichier(){
   clearTimeout(minuteurFichier);
   minuteurFichier = setTimeout(() => {
     const o = { comptes: [...comptes.values()], relations: [...relations], groupes: [...groupes.values()],
-                messages: [...convs.values()].flat().concat(idees, parties, votesMsgs), lus: [...lus], records: [...records],
+                messages: [...convs.values()].flat().concat(idees, parties, votesMsgs, annoncesMsgs), lus: [...lus], records: [...records],
                 idents: [...idents.values()], saves: [...savesFichier], fusions: [...fusions] };
     try { fs.writeFileSync(FICHIER, JSON.stringify(o)); } catch (e) { journal("écriture impossible", e.message); }
   }, 1000);
 }
 /* La boîte à idées et le journal des parties en ligne : rangés à part (pas
    des discussions), gardés dans la même table que les messages. */
-const idees = [], parties = [], votesMsgs = [];
+const idees = [], parties = [], votesMsgs = [], annoncesMsgs = [];
+const annonces = new Map();      // ID → [{ id, msg }] : un message affiché une seule fois au joueur (compte retrouvé…)
 function rangerMessage(m){
   if (m.vers === "x:vote"){
     let o = null; try { o = JSON.parse(m.texte); } catch (e) {}
@@ -118,6 +119,8 @@ function rangerMessage(m){
     if (o && !votes.has(k)){ votes.set(k, +o.c | 0); votesMsgs.push(m); }
     return "x:vote";
   }
+  if (m.vers === "x:annonce"){ let o = null; try { o = JSON.parse(m.texte); } catch (e) {}
+    if (o && o.id){ const l = annonces.get(m.de) || []; if (!l.some(x => x.id === o.id)) l.push(o); annonces.set(m.de, l); annoncesMsgs.push(m); } return "x:annonce"; }
   if (m.vers === "x:idee"){ idees.push(m); if (idees.length > 500) idees.shift(); return "x:idee"; }
   if (m.vers === "x:partie"){ parties.push(m); if (parties.length > 200) parties.shift(); return "x:partie"; }
   const k = m.vers.startsWith("g:") ? m.vers : cleP(m.de, m.vers);
@@ -333,6 +336,16 @@ effacerComptes();
 /* Deux ID pour le même joueur (il a créé son compte sur un appareil, puis s'est connecté depuis celui où il jouait) :
    l'ancien est fusionné dans le compte : ses records (le meilleur temps garde), ses amis, ses groupes, ses stats ;
    il disparaît des classements, et son appareil est redirigé vers le compte (sa progression y est ajoutée par le jeu). */
+const MSG_RETROUVE = "Salut {nom} !\n\nBonne nouvelle : on a retrouvé ton compte 🎉\n\nTa progression, tes voitures, tes records et tes amis sont de retour. Désolé pour la frayeur !\n\nSi quelque chose manque encore, dis-le à Sltfils.";
+// un message pour un joueur, affiché une seule fois (tout de suite s'il est en ligne, sinon à sa prochaine venue)
+function annoncer(p, msg){
+  const o = { id: "annonce-" + Date.now().toString(36), msg }, m = { id: nouvelId(), de: p, vers: "x:annonce", texte: JSON.stringify(o), t: Date.now() };
+  rangerMessage(m); ecrire({ f: "upsert", t: "dx_messages", conflit: "id", l: [{ id: m.id, de: m.de, vers: m.vers, texte: m.texte, t: m.t }] });
+  aTous(p, { t: "c-annonce", s: o });
+}
+// comptes à qui on rend leur progression (une seule fois, côté jeu) : Neros (23 nov. 2026), il en était à la Part 2
+const RETROUVES = { "neros": { id: "retrouve-neros-1", part2: true, argentMin: 3000000 } };
+function retrouves(p){ const o = idents.get(p), r = o && RETROUVES[o.bas]; return r ? [Object.assign({ msg: MSG_RETROUVE }, r)] : []; }
 function fusionner(q, p){
   const a = comptes.get(q), b = comptes.get(p); if (!a || !b || q === p || idents.has(q)) return false;
   // records
@@ -445,7 +458,7 @@ function etatDe(p){
     if (k.startsWith("g:")){ const g = groupes.get(k.slice(2)); if (g && g.membres.includes(p)) derniers[k] = der; }
     else { const [a, b] = k.slice(2).split("|"); if (a === p || b === p) derniers["p:" + (a === p ? b : a)] = der; }
   }
-  return { t: "c-etat", id: p, nom: nomDe(p), amis: amisL, demandes, envoyees, bloques, groupes: gr, nonLus: nonLus(p), derniers, admin: p === idAdmin(), sanctions: SANCTIONS[p] || SANCTIONS[exDe.get(p)] || [], compteDX: etatCompteDX(p) };
+  return { t: "c-etat", id: p, nom: nomDe(p), amis: amisL, demandes, envoyees, bloques, groupes: gr, nonLus: nonLus(p), derniers, admin: p === idAdmin(), sanctions: (SANCTIONS[p] || SANCTIONS[exDe.get(p)] || []).concat(annonces.get(p) || [], retrouves(p)), compteDX: etatCompteDX(p) };
 }
 const majEtat = p => { if (enLigne.has(p)) aTous(p, etatDe(p)); };
 function presence(p, enL){
@@ -654,13 +667,29 @@ async function recevoir(c, d, ctx){
         records: [...records.values()].filter(r => r.joueur === id).length }; }); };
     const cdx = [...idents.values()].map(o => ({ id: o.id, login: o.login, nom: nomDe(o.id), smaj: o.smaj || null, appareils: (o.cles || []).length + 1, enLigne: enLigne.has(o.id), doublons: doublons(o) }))
       .sort((a, b) => (b.smaj || 0) - (a.smaj || 0));
-    return envoyer(c, { t: "c-admin", enLigne: enL, comptes: comptes.size, groupes: groupesJeu, parties: pt, idees: id2, tous, comptesDX: cdx, comptesDXActifs: comptesDX === true });
+    // le même nom sur plusieurs ID (souvent le même joueur, sur deux appareils) : à fusionner
+    const nbRec = new Map(); for (const r of records.values()) nbRec.set(r.joueur, (nbRec.get(r.joueur) || 0) + 1);
+    const memeNom = [...parNom.entries()].filter(([k, l]) => l.length > 1 && k && !/^joueur\s*\d*$/.test(k)).map(([k, l]) => {
+      const m = l.map(x => { const st = x.stats || {}; return { id: x.id, nom: x.nom, login: (idents.get(x.id) || {}).login || null, records: nbRec.get(x.id) || 0,
+        courses: st.courses == null ? null : st.courses, voitures: st.voitures == null ? null : st.voitures, vu: enLigne.has(x.id) ? Date.now() : dernierVu.get(x.id) || null }; });
+      const cible = m.find(x => x.login) || [...m].sort((a, b) => (b.vu || 0) - (a.vu || 0))[0];
+      return { nom: l[0].nom, cible: cible.id, membres: m };
+    }).filter(g => g.membres.some(x => x.records || x.courses)).sort((a, b) => a.nom.localeCompare(b.nom));
+    return envoyer(c, { t: "c-admin", enLigne: enL, comptes: comptes.size, groupes: groupesJeu, parties: pt, idees: id2, tous, comptesDX: cdx, comptesDXActifs: comptesDX === true, memeNom });
+  }
+  // l'administrateur envoie le message « on a retrouvé ton compte » à un joueur
+  if (d.t === "c-admin-annonce"){
+    if (p !== idAdmin()) return;
+    const id = String(d.id || ""); if (!comptes.has(id)) return envoyer(c, { t: "c-admin-mdp-ok", fusion: true, erreur: "ID introuvable." });
+    annoncer(id, MSG_RETROUVE); journal("admin : message « compte retrouvé » pour", id, nomDe(id));
+    return envoyer(c, { t: "c-admin-mdp-ok", fusion: true, annonce: true, id, login: nomDe(id) });
   }
   // l'administrateur fusionne un ancien ID (doublon) dans un compte
   if (d.t === "c-admin-fusion"){
     if (p !== idAdmin()) return;
     const q = String(d.ancien || ""), vers = String(d.id || "");
-    const ok = idents.has(vers) && fusionner(q, vers);
+    const ok = comptes.has(vers) && fusionner(q, vers);
+    if (ok && d.prevenir !== false) annoncer(vers, MSG_RETROUVE);
     return envoyer(c, { t: "c-admin-mdp-ok", fusion: true, id: vers, login: (idents.get(vers) || {}).login, erreur: ok ? null : "Fusion impossible (ID introuvable, ou c'est lui-même un compte)." });
   }
   // l'administrateur regarde les sauvegardes en ligne d'un compte (l'actuelle et l'historique) et peut en remettre une
@@ -674,6 +703,7 @@ async function recevoir(c, d, ctx){
       const reste = h.filter((x, i) => i !== n), prec = JSON.stringify(nouvelHisto(cur, reste));
       o.smaj = Math.max(o.smaj + 1, Date.now()); o.maj = Date.now(); sauverIdent(o, s, prec);
       journal("admin : sauvegarde remise pour", o.id, o.login, progDe(cur), "→", progDe(s));
+      annoncer(o.id, MSG_RETROUVE);
       // les appareils connectés la récupèrent tout de suite (le jeu la fusionne avec la sienne : rien ne se perd)
       const sl = enLigne.get(o.id); if (sl) for (const x of sl) envoyer(x, { t: "c-save-donnees", save: s, smaj: o.smaj });
       cur = s; h = JSON.parse(prec);
