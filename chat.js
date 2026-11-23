@@ -344,7 +344,7 @@ function annoncer(p, msg){
   aTous(p, { t: "c-annonce", s: o });
 }
 // comptes à qui on rend leur progression (une seule fois, côté jeu) : Neros (23 nov. 2026), il en était à la Part 2
-const RETROUVES = { "neros": { id: "retrouve-neros-1", part2: true, argentMin: 3000000 } };
+const RETROUVES = { "neros": { id: "retrouve-neros-2", part2: true, argentMin: 3000000 } };
 // (par le pseudo du compte, ou par le nom affiché : même sans compte ☁️, et quel que soit l'ID qui reste après une fusion)
 // au démarrage : tous les ID « Neros » regroupés sur un seul (celui du compte ☁️, sinon celui qu'il utilise en dernier)
 (async () => { await chargement; await new Promise(r => setTimeout(r, 3000));
@@ -355,8 +355,11 @@ const RETROUVES = { "neros": { id: "retrouve-neros-1", part2: true, argentMin: 3
     const cible = l.find(x => idents.has(x.id)) || [...l].sort((a, b) => vu(b) - vu(a))[0];
     for (const x of l) if (x.id !== cible.id && !idents.has(x.id)) fusionner(x.id, cible.id);
   } } catch (e){ journal("regroupement", e.message); } })();
+//   + d'après le classement : ses berries (profil) et les courses de la Part 2 où il a un temps (ouvertes jusqu'à la dernière)
 function retrouves(p){ const o = idents.get(p), n = String(nomDe(p) || "").trim().toLowerCase(), r = (o && RETROUVES[o.bas]) || RETROUVES[n];
-  return r ? [Object.assign({ msg: MSG_RETROUVE }, r)] : []; }
+  if (!r) return [];
+  const st = (comptes.get(p) || {}).stats || {}, p2 = [...new Set([...records.values()].filter(x => x.joueur === p && / 2$/.test(x.course)).map(x => x.course))];
+  return [Object.assign({ msg: MSG_RETROUVE }, r, { argentMin: Math.max(r.argentMin || 0, +st.argent || 0), p2Courses: p2 })]; }
 function fusionner(q, p){
   const a = comptes.get(q), b = comptes.get(p); if (!a || !b || q === p || idents.has(q)) return false;
   // records
