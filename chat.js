@@ -224,6 +224,27 @@ async function lireSave(id){
   const r = await fetch(`${SUPA_URL}/rest/v1/dx_sauvegardes?id=eq.${encodeURIComponent(id)}&select=save`, { headers: entetes() });
   if (!r.ok) throw new Error(r.status); const l = await r.json(); return l[0] && l[0].save || null;
 }
+// l'historique des sauvegardes d'un compte (« save_prec ») : les 6 dernières, plus toujours la meilleure jamais vue
+//   (avant : une seule sauvegarde dans save_prec ; maintenant une liste JSON)
+async function lireHisto(id){
+  let brut = null;
+  if (!supa) brut = savesFichier.get(id + "|prec") || null;
+  else { const r = await fetch(`${SUPA_URL}/rest/v1/dx_sauvegardes?id=eq.${encodeURIComponent(id)}&select=save_prec`, { headers: entetes() });
+    if (!r.ok) throw new Error(r.status); const l = await r.json(); brut = l[0] && l[0].save_prec || null; }
+  if (!brut) return [];
+  try { const x = JSON.parse(brut); if (Array.isArray(x)) return x.filter(s => typeof s === "string"); } catch (e) {}
+  return [brut];
+}
+const progDe = s => { try { const c = JSON.parse(s); return (+c.niveau || 0) * 10000 + (+c.niveau2 || 0) * 10000 + ((c.possedees || []).length) * 100 + ((c.podiums || []).length) * 10 + (+((c.stats || {}).courses) || 0); } catch (e) { return -1; } };
+function nouvelHisto(ancienne, histo){
+  const l = [ancienne, ...histo].filter((s, i, a) => s && a.indexOf(s) === i);
+  const garde = l.slice(0, 6), meilleure = l.reduce((m, s) => progDe(s) > progDe(m) ? s : m, l[0]);
+  if (meilleure && !garde.includes(meilleure)) garde.push(meilleure);
+  return garde;
+}
+const resumeSave = s => { try { const c = JSON.parse(s); const st = c.stats || {};
+  return { maj: +c.maj || 0, prenom: String(c.prenom || ""), niveau: +c.niveau || 0, niveau2: +c.niveau2 || 0, voitures: (c.possedees || []).length, podiums: (c.podiums || []).length,
+           courses: +st.courses || 0, victoires: +st.victoires || 0, argent: +c.argent || 0, gyro: !!c.gyro, prog: progDe(s) }; } catch (e) { return null; } };
 const etatCompteDX = p => { const o = idents.get(p); return { actif: comptesDX === true, lie: !!o, login: o ? o.login : null, smaj: o ? o.smaj : 0 }; };
 
 /* ───────────── Community Vote ─────────────
@@ -527,9 +548,11 @@ async function recevoir(c, d, ctx){
     let maj = 0; try { const x = JSON.parse(s); if (!x || typeof x !== "object" || !x.sceau || !Array.isArray(x.possedees)) return; maj = +x.maj || 0; } catch (e) { return; }
     // un autre appareil a envoyé une sauvegarde depuis la dernière que celui-ci a vue : il doit d'abord la récupérer
     if (d.force !== true && o.smaj && +d.base !== o.smaj) return envoyer(c, { t: "c-save-vieille", smaj: o.smaj });
-    let prec = derniereSave.get(p) || null;
-    if (!prec && o.smaj) try { prec = await lireSave(p); } catch (e) {}
-    if (prec === s) prec = null;
+    let ancienne = derniereSave.get(p) || null;
+    if (!ancienne && o.smaj) try { ancienne = await lireSave(p); } catch (e) {}
+    let prec = null;
+    if (ancienne && ancienne !== s){ let h = []; try { h = await lireHisto(p); } catch (e) { h = []; } prec = JSON.stringify(nouvelHisto(ancienne, h));
+      if (progDe(s) < progDe(ancienne)) journal("sauvegarde en ligne avec MOINS de progression", p, o.login, progDe(ancienne), "→", progDe(s)); }
     o.smaj = Math.max(maj, o.smaj + 1); o.maj = Date.now(); sauverIdent(o, s, prec);
     return envoyer(c, { t: "c-save-ok", smaj: o.smaj });
   }
@@ -584,6 +607,23 @@ async function recevoir(c, d, ctx){
     const cdx = [...idents.values()].map(o => ({ id: o.id, login: o.login, nom: nomDe(o.id), smaj: o.smaj || null, appareils: (o.cles || []).length + 1, enLigne: enLigne.has(o.id) }))
       .sort((a, b) => (b.smaj || 0) - (a.smaj || 0));
     return envoyer(c, { t: "c-admin", enLigne: enL, comptes: comptes.size, groupes: groupesJeu, parties: pt, idees: id2, tous, comptesDX: cdx, comptesDXActifs: comptesDX === true });
+  }
+  // l'administrateur regarde les sauvegardes en ligne d'un compte (l'actuelle et l'historique) et peut en remettre une
+  if (d.t === "c-admin-saves" || d.t === "c-admin-restaurer"){
+    if (p !== idAdmin()) return;
+    const o = idents.get(String(d.id || "")); if (!o) return envoyer(c, { t: "c-admin-saves", id: d.id, erreur: "Ce joueur n'a pas de compte." });
+    let cur = null, h = [];
+    try { cur = await lireSave(o.id); h = await lireHisto(o.id); } catch (e) { return envoyer(c, { t: "c-admin-saves", id: o.id, erreur: "Lecture impossible : " + e.message }); }
+    if (d.t === "c-admin-restaurer"){
+      const n = +d.n, s = h[n]; if (!Number.isInteger(n) || !s) return envoyer(c, { t: "c-admin-saves", id: o.id, erreur: "Cette sauvegarde n'existe plus." });
+      const reste = h.filter((x, i) => i !== n), prec = JSON.stringify(nouvelHisto(cur, reste));
+      o.smaj = Math.max(o.smaj + 1, Date.now()); o.maj = Date.now(); sauverIdent(o, s, prec);
+      journal("admin : sauvegarde remise pour", o.id, o.login, progDe(cur), "→", progDe(s));
+      // les appareils connectés la récupèrent tout de suite (le jeu la fusionne avec la sienne : rien ne se perd)
+      const sl = enLigne.get(o.id); if (sl) for (const x of sl) envoyer(x, { t: "c-save-donnees", save: s, smaj: o.smaj });
+      cur = s; h = JSON.parse(prec);
+    }
+    return envoyer(c, { t: "c-admin-saves", id: o.id, login: o.login, actuelle: cur ? resumeSave(cur) : null, histo: h.map(resumeSave), restaure: d.t === "c-admin-restaurer" });
   }
   // l'administrateur donne un mot de passe provisoire à un joueur qui a oublié le sien (affiché une seule fois)
   if (d.t === "c-admin-mdp"){
